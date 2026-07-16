@@ -1,0 +1,53 @@
+package dev.injun.remotesync.core.port
+
+import dev.injun.remotesync.core.model.FileMeta
+import dev.injun.remotesync.core.model.Snapshot
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
+import okio.Source
+
+/**
+ * A replica the engine reconciles (local folder or remote endpoint). Local and remote
+ * share this interface, which keeps the protocol layer swappable.
+ *
+ * [writeAtomic] and [move] MUST be atomic w.r.t. concurrent readers and crashes
+ * (write-to-temp + rename) — the executor relies on this for its no-data-loss
+ * guarantee. Paths are relative to the sync root, '/'-separated, no leading slash.
+ */
+interface Storage {
+
+    /**
+     * Build a hashed snapshot. Implementations may reuse a hash from [hint] when a
+     * file's size+mtime are unchanged, avoiding re-hashing unmodified files.
+     */
+    suspend fun scan(hint: Snapshot = Snapshot.EMPTY): Snapshot
+
+    suspend fun read(path: String): Source
+
+    /** Atomically write [content] to [path]; takes ownership of and closes [content]. */
+    suspend fun writeAtomic(path: String, content: Source)
+
+    /** Delete [path] if present (idempotent). */
+    suspend fun delete(path: String)
+
+    /** Atomically rename [from] to [to], replacing [to] if present. */
+    suspend fun move(from: String, to: String)
+
+    suspend fun stat(path: String): FileMeta?
+
+    /**
+     * Cheap size/mtime lookup with NO content hash ([stat] on a remote reads the whole
+     * file to hash it); null if [path] is not a regular file. The executor uses this to
+     * re-verify a target immediately before a destructive operation and to record the
+     * destination's own stat after a transfer.
+     */
+    suspend fun probe(path: String): RawEntry?
+
+    /**
+     * Push-based change signals, emitted when this backend detects a change (inotify,
+     * SMB2 CHANGE_NOTIFY, …). Default: none — the backend has no push and the caller's
+     * baseline poll covers it. Push-vs-poll and runtime capability (e.g. SMB2 vs SMB1)
+     * stay inside each implementation, so the orchestrator treats every backend alike.
+     */
+    fun changes(): Flow<Unit> = emptyFlow()
+}

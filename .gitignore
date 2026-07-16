@@ -1,0 +1,23 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Portable toolchain fetched for headless builds (JDK/Gradle) — not committed
+.toolchain/
+
+# Android
+local.properties
+*.apk
+*.aab
+*.keystore
+!debug.keystore
+.cxx/
+
+# IDE
+.idea/
+*.iml
+.kotlin/
+
+# OS
+.DS_Store

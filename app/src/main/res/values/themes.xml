@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Compose owns the actual UI/colors via MaterialTheme; this base theme just
+         removes the action bar and lets the window go edge-to-edge. -->
+    <style name="Theme.RemoteSync" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+</resources>

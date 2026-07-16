@@ -1,0 +1,396 @@
+package dev.injun.remotesync.data.remote
+
+import android.util.Log
+import com.hierynomus.mserref.NtStatus
+import com.hierynomus.msdtyp.AccessMask
+import com.hierynomus.msfscc.FileAttributes
+import com.hierynomus.mssmb2.SMB2CompletionFilter
+import com.hierynomus.mssmb2.SMB2CreateDisposition
+import com.hierynomus.mssmb2.SMB2ShareAccess
+import com.hierynomus.mssmb2.SMBApiException
+import com.hierynomus.smbj.SMBClient
+import com.hierynomus.smbj.SmbConfig as SmbjConfig
+import com.hierynomus.smbj.auth.AuthenticationContext
+import com.hierynomus.smbj.connection.Connection
+import com.hierynomus.smbj.session.Session
+import com.hierynomus.smbj.share.DiskShare
+import dev.injun.remotesync.core.model.FileMeta
+import dev.injun.remotesync.core.model.Snapshot
+import dev.injun.remotesync.core.port.RawEntry
+import dev.injun.remotesync.core.port.SnapshotBuilder
+import dev.injun.remotesync.core.port.Storage
+import dev.injun.remotesync.sync.RemoteStorage
+import dev.injun.remotesync.sync.SmbConfig
+import java.security.MessageDigest
+import java.util.EnumSet
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import okio.Buffer
+import okio.Source
+import okio.buffer
+
+/**
+ * [Storage] over an SMB2/3 share via smbj (v1 remote). Writes are atomic (temp name
+ * then server-side rename). smbj calls are blocking and run on [Dispatchers.IO]; the
+ * connection is opened lazily, reused for a whole sync, and torn down by [close].
+ */
+class SmbRemoteStorage(
+    private val config: SmbConfig,
+    private val client: SMBClient = secureClient(),
+) : RemoteStorage {
+
+    private var connection: Connection? = null
+    private var session: Session? = null
+    private var share: DiskShare? = null
+
+    private fun share(): DiskShare {
+        share?.let { return it }
+        val conn = client.connect(config.host, config.port)
+        val sess = conn.authenticate(
+            AuthenticationContext(config.username, config.password.toCharArray(), config.domain),
+        )
+        val disk = sess.connectShare(config.shareName) as DiskShare
+        connection = conn
+        session = sess
+        share = disk
+        return disk
+    }
+
+    override suspend fun scan(hint: Snapshot): Snapshot = withContext(Dispatchers.IO) {
+        val disk = share()
+        val entries = ArrayList<RawEntry>()
+        // Tolerate a not-yet-existing sync root (first sync to a fresh remote folder):
+        // treat it as empty rather than failing. The first write creates it.
+        val rootSmb = smbPath("")
+        if (rootSmb.isEmpty() || disk.folderExists(rootSmb)) {
+            walk(disk, "", entries)
+        }
+        SnapshotBuilder.build(entries, hint) { path -> hashRemote(disk, path) }
+    }
+
+    private fun walk(disk: DiskShare, dirRel: String, out: MutableList<RawEntry>) {
+        for (info in disk.list(smbPath(dirRel))) {
+            val name = info.fileName
+            if (name == "." || name == "..") continue
+            val childRel = if (dirRel.isEmpty()) name else "$dirRel/$name"
+            val isDir = (info.fileAttributes and FileAttributes.FILE_ATTRIBUTE_DIRECTORY.value) != 0L
+            if (isTempName(name)) {
+                // In-flight or orphaned writeAtomic temp (ours or another device's) —
+                // never a sync entry. Remove it only once it is old enough that no
+                // writer can still be streaming into it.
+                val ageMs = System.currentTimeMillis() - info.lastWriteTime.toEpochMillis()
+                if (!isDir && ageMs > STALE_TEMP_AGE_MS) runCatching { disk.rm(smbPath(childRel)) }
+                continue
+            }
+            if (isDir) {
+                walk(disk, childRel, out)
+            } else {
+                out.add(RawEntry(childRel, info.endOfFile, info.lastWriteTime.toEpochMillis()))
+            }
+        }
+    }
+
+    override suspend fun read(path: String): Source = withContext(Dispatchers.IO) {
+        // Read fully and close the handle immediately, returning an in-memory source.
+        // Wrapping the open smbj File in a stream leaks the handle (closing the
+        // InputStream does NOT close the File), and a lingering handle blocks a later
+        // delete/rename of the same path. Fine for the small files this app targets.
+        share().openFile(
+            smbPath(path),
+            EnumSet.of(AccessMask.GENERIC_READ),
+            null,
+            SMB2ShareAccess.ALL,
+            SMB2CreateDisposition.FILE_OPEN,
+            null,
+        ).use { file ->
+            val bytes = file.getInputStream().use { it.readBytes() }
+            Buffer().write(bytes)
+        }
+    }
+
+    override suspend fun writeAtomic(path: String, content: Source): Unit = withContext(Dispatchers.IO) {
+        val disk = share()
+        val finalPath = smbPath(path)
+        val tmpPath = tempSibling(finalPath)
+        ensureParentDirs(disk, path)
+        try {
+            // Open the temp file ONCE with DELETE access, stream into it, then rename
+            // over the target on the SAME handle. Renaming (SET_INFO FileRename) needs
+            // DELETE on the open handle; doing it on the write handle guarantees that.
+            disk.openFile(
+                tmpPath,
+                EnumSet.of(AccessMask.GENERIC_WRITE, AccessMask.GENERIC_READ, AccessMask.DELETE),
+                null,
+                SMB2ShareAccess.ALL,
+                SMB2CreateDisposition.FILE_OVERWRITE_IF,
+                null,
+            ).use { tmp ->
+                val bytes = content.buffer().use { it.readByteArray() }
+                tmp.write(bytes, 0)
+                renameReplacing(disk, tmp, finalPath)
+            }
+        } finally {
+            content.close()
+            runCatching { if (disk.fileExists(tmpPath)) disk.rm(tmpPath) }
+        }
+    }
+
+    override suspend fun delete(path: String): Unit = withContext(Dispatchers.IO) {
+        val disk = share()
+        val p = smbPath(path)
+        if (disk.fileExists(p)) disk.rm(p)
+    }
+
+    override suspend fun move(from: String, to: String): Unit = withContext(Dispatchers.IO) {
+        val disk = share()
+        ensureParentDirs(disk, to)
+        disk.openFile(
+            smbPath(from),
+            EnumSet.of(AccessMask.GENERIC_READ, AccessMask.DELETE),
+            null,
+            SMB2ShareAccess.ALL,
+            SMB2CreateDisposition.FILE_OPEN,
+            null,
+        ).use { renameReplacing(disk, it, smbPath(to)) }
+    }
+
+    override suspend fun stat(path: String): FileMeta? = withContext(Dispatchers.IO) {
+        val disk = share()
+        val p = smbPath(path)
+        if (!disk.fileExists(p)) {
+            null
+        } else {
+            val info = disk.getFileInformation(p)
+            FileMeta(
+                info.standardInformation.endOfFile,
+                info.basicInformation.lastWriteTime.toEpochMillis(),
+                hashRemote(disk, path),
+            )
+        }
+    }
+
+    override suspend fun probe(path: String): RawEntry? = withContext(Dispatchers.IO) {
+        val disk = share()
+        val p = smbPath(path)
+        if (!disk.fileExists(p)) {
+            null
+        } else {
+            val info = disk.getFileInformation(p)
+            RawEntry(
+                path,
+                info.standardInformation.endOfFile,
+                info.basicInformation.lastWriteTime.toEpochMillis(),
+            )
+        }
+    }
+
+    /**
+     * Rename [handle] onto [dest], replacing any existing file. Tries a true atomic
+     * replace (SET_INFO rename with ReplaceIfExists, supported by Windows and most
+     * NAS). Samba rejects that with ACCESS_DENIED, so we fall back to removing the
+     * target then renaming — the temp already holds the complete file, so no partial
+     * content is ever exposed; only a sub-millisecond gap where the name is absent.
+     */
+    private fun renameReplacing(disk: DiskShare, handle: com.hierynomus.smbj.share.File, dest: String) {
+        try {
+            handle.rename(dest, true)
+        } catch (e: SMBApiException) {
+            if (e.status != NtStatus.STATUS_ACCESS_DENIED) throw e
+            // Remove the target if present (ignore "not found"), then rename without
+            // replace. This is the path taken on Samba.
+            runCatching { disk.rm(dest) }
+            handle.rename(dest, false)
+        }
+    }
+
+    private fun ensureParentDirs(disk: DiskShare, path: String) {
+        requireSafeRel(path)
+        // Full parent path within the share, INCLUDING the configured rootPath — the
+        // root sub-directory may not exist yet on a fresh remote, and every level up
+        // to the file's parent must be created before the file itself.
+        val fullParent = listOf(config.rootPath, path.substringBeforeLast('/', ""))
+            .filter { it.isNotEmpty() }
+            .joinToString("/")
+            .trim('/')
+        if (fullParent.isEmpty()) return
+        var acc = ""
+        for (seg in fullParent.split('/')) {
+            acc = if (acc.isEmpty()) seg else "$acc/$seg"
+            val smb = acc.replace('/', '\\')
+            if (!disk.folderExists(smb)) disk.mkdir(smb)
+        }
+    }
+
+    private fun hashRemote(disk: DiskShare, path: String): String {
+        val md = MessageDigest.getInstance("SHA-256")
+        disk.openFile(
+            smbPath(path),
+            EnumSet.of(AccessMask.GENERIC_READ),
+            null,
+            SMB2ShareAccess.ALL,
+            SMB2CreateDisposition.FILE_OPEN,
+            null,
+        ).use { file ->
+            file.getInputStream().use { ins ->
+                val buf = ByteArray(1 shl 16)
+                while (true) {
+                    val n = ins.read(buf)
+                    if (n < 0) break
+                    md.update(buf, 0, n)
+                }
+            }
+        }
+        return md.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    /** Convert a '/'-relative sync path to a share-relative, '\'-separated SMB path. */
+    private fun smbPath(rel: String): String {
+        requireSafeRel(rel)
+        return listOf(config.rootPath, rel)
+            .filter { it.isNotEmpty() }
+            .joinToString("/")
+            .trim('/')
+            .replace('/', '\\')
+    }
+
+    // Reject relative paths whose segments would escape the configured rootPath once
+    // the server resolves them: '\' is a path separator on SMB but a legal character
+    // in local filenames, and '..' climbs out. Mirrors the local resolve() guard.
+    private fun requireSafeRel(rel: String) {
+        require(rel.isEmpty() || rel.split('/').none { it.isEmpty() || it == "." || it == ".." || '\\' in it }) {
+            "path escapes sync root: $rel"
+        }
+    }
+
+    // Same recognizable ".<name>.tmp-<nano>" pattern as the local storage, so both
+    // sides' scans skip in-flight/orphaned temps instead of syncing them.
+    private fun tempSibling(finalPath: String): String {
+        val dir = finalPath.substringBeforeLast('\\', "")
+        val name = ".${finalPath.substringAfterLast('\\')}.tmp-${System.nanoTime()}"
+        return if (dir.isEmpty()) name else "$dir\\$name"
+    }
+
+    private fun isTempName(name: String): Boolean = name.startsWith(".") && name.contains(".tmp-")
+
+    /**
+     * Remote push via SMB2 CHANGE_NOTIFY on a dedicated watch connection. Transient
+     * failures (Wi-Fi blip, NAS reboot, session timeout) reconnect with backoff, so
+     * one drop doesn't silently disable push for the rest of the subscription. Only
+     * when the server genuinely doesn't support CHANGE_NOTIFY does the flow complete
+     * — the orchestrator's baseline poll covers remote changes.
+     */
+    override fun changes(): Flow<Unit> = callbackFlow {
+        var watchClient: SMBClient? = null
+        var watchConn: Connection? = null
+        val job = launch(Dispatchers.IO) {
+            var backoffMs = WATCH_RETRY_MIN_MS
+            while (isActive) {
+                val currentClient = secureClient()
+                watchClient = currentClient
+                try {
+                    val conn = currentClient.connect(config.host, config.port)
+                    watchConn = conn
+                    val session = conn.authenticate(
+                        AuthenticationContext(config.username, config.password.toCharArray(), config.domain),
+                    )
+                    val disk = session.connectShare(config.shareName) as DiskShare
+                    val rootSmb = smbPath("")
+                    // A missing sync root (first sync pending) just retries below.
+                    if (rootSmb.isEmpty() || disk.folderExists(rootSmb)) {
+                        val dir = disk.openDirectory(
+                            rootSmb,
+                            EnumSet.of(AccessMask.GENERIC_READ),
+                            null,
+                            SMB2ShareAccess.ALL,
+                            SMB2CreateDisposition.FILE_OPEN,
+                            null,
+                        )
+                        while (isActive) {
+                            // Blocks until the server reports a change (recursively via watchTree).
+                            dir.watchAsync(WATCH_FILTERS, true).get()
+                            backoffMs = WATCH_RETRY_MIN_MS
+                            trySend(Unit)
+                        }
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    if (isChangeNotifyUnsupported(e)) {
+                        Log.i(TAG, "CHANGE_NOTIFY unsupported by ${config.host}; relying on baseline polling", e)
+                        this@callbackFlow.close()
+                        return@launch
+                    }
+                    Log.w(TAG, "SMB watch on ${config.host} failed; retrying in ${backoffMs}ms", e)
+                } finally {
+                    runCatching { watchConn?.close() }
+                    runCatching { currentClient.close() }
+                    watchConn = null
+                }
+                delay(backoffMs)
+                backoffMs = (backoffMs * 2).coerceAtMost(WATCH_RETRY_MAX_MS)
+            }
+        }
+        awaitClose {
+            job.cancel()
+            // The loop blocks inside smbj calls that never observe cancellation;
+            // closing the connection from here is what unblocks them.
+            runCatching { watchConn?.close() }
+            runCatching { watchClient?.close() }
+        }
+    }
+
+    private fun isChangeNotifyUnsupported(e: Exception): Boolean {
+        var cause: Throwable? = e
+        while (cause != null) {
+            if (cause is SMBApiException && cause.status == NtStatus.STATUS_NOT_SUPPORTED) return true
+            cause = cause.cause
+        }
+        return false
+    }
+
+    override fun close() {
+        runCatching { share?.close() }
+        runCatching { session?.close() }
+        runCatching { connection?.close() }
+        share = null
+        session = null
+        connection = null
+    }
+
+    private companion object {
+        const val TAG = "SmbRemoteStorage"
+
+        /** Reconnect backoff for the CHANGE_NOTIFY watch loop. */
+        const val WATCH_RETRY_MIN_MS = 5_000L
+        const val WATCH_RETRY_MAX_MS = 5 * 60_000L
+
+        /** How old an orphaned writeAtomic temp must be before scan removes it. */
+        const val STALE_TEMP_AGE_MS = 60 * 60_000L
+
+        /**
+         * smbj defaults leave message signing and encryption OFF, so an on-network
+         * attacker could read or tamper with synced content in transit. Require both.
+         */
+        fun secureClient(): SMBClient = SMBClient(
+            SmbjConfig.builder()
+                .withSigningRequired(true)
+                .withEncryptData(true)
+                .build(),
+        )
+
+        val WATCH_FILTERS: Set<SMB2CompletionFilter> = EnumSet.of(
+            SMB2CompletionFilter.FILE_NOTIFY_CHANGE_FILE_NAME,
+            SMB2CompletionFilter.FILE_NOTIFY_CHANGE_DIR_NAME,
+            SMB2CompletionFilter.FILE_NOTIFY_CHANGE_LAST_WRITE,
+            SMB2CompletionFilter.FILE_NOTIFY_CHANGE_SIZE,
+            SMB2CompletionFilter.FILE_NOTIFY_CHANGE_CREATION,
+        )
+    }
+}
