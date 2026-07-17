@@ -6,6 +6,7 @@ import com.hierynomus.msdtyp.AccessMask
 import com.hierynomus.msfscc.FileAttributes
 import com.hierynomus.mssmb2.SMB2CompletionFilter
 import com.hierynomus.mssmb2.SMB2CreateDisposition
+import com.hierynomus.mssmb2.SMB2Dialect
 import com.hierynomus.mssmb2.SMB2ShareAccess
 import com.hierynomus.mssmb2.SMBApiException
 import com.hierynomus.smbj.SMBClient
@@ -21,6 +22,7 @@ import dev.injun.remotesync.core.port.SnapshotBuilder
 import dev.injun.remotesync.core.port.Storage
 import dev.injun.remotesync.sync.RemoteStorage
 import dev.injun.remotesync.sync.SmbConfig
+import java.io.IOException
 import java.security.MessageDigest
 import java.util.EnumSet
 import kotlinx.coroutines.CancellationException
@@ -52,7 +54,7 @@ class SmbRemoteStorage(
 
     private fun share(): DiskShare {
         share?.let { return it }
-        val conn = client.connect(config.host, config.port)
+        val conn = connectEncrypted(client)
         val sess = conn.authenticate(
             AuthenticationContext(config.username, config.password.toCharArray(), config.domain),
         )
@@ -61,6 +63,20 @@ class SmbRemoteStorage(
         session = sess
         share = disk
         return disk
+    }
+
+    // smbj's withEncryptData is best-effort: it only takes effect when the negotiated
+    // connection can encrypt, and otherwise the session silently sends plaintext.
+    // [secureClient] already restricts dialects to SMB 3.x; this rejects the residual
+    // case of a 3.x server that negotiated no encryption capability, so a connection
+    // that cannot encrypt fails outright instead of downgrading.
+    private fun connectEncrypted(client: SMBClient): Connection {
+        val conn = client.connect(config.host, config.port)
+        if (!conn.connectionContext.supportsEncryption()) {
+            runCatching { conn.close() }
+            throw IOException("SMB server ${config.host} negotiated no encryption; refusing to sync in plaintext")
+        }
+        return conn
     }
 
     override suspend fun scan(hint: Snapshot): Snapshot = withContext(Dispatchers.IO) {
@@ -81,12 +97,12 @@ class SmbRemoteStorage(
             if (name == "." || name == "..") continue
             val childRel = if (dirRel.isEmpty()) name else "$dirRel/$name"
             val isDir = (info.fileAttributes and FileAttributes.FILE_ATTRIBUTE_DIRECTORY.value) != 0L
-            if (isTempName(name)) {
+            if (!isDir && isTempName(name)) {
                 // In-flight or orphaned writeAtomic temp (ours or another device's) —
                 // never a sync entry. Remove it only once it is old enough that no
                 // writer can still be streaming into it.
                 val ageMs = System.currentTimeMillis() - info.lastWriteTime.toEpochMillis()
-                if (!isDir && ageMs > STALE_TEMP_AGE_MS) runCatching { disk.rm(smbPath(childRel)) }
+                if (ageMs > STALE_TEMP_AGE_MS) runCatching { disk.rm(smbPath(childRel)) }
                 continue
             }
             if (isDir) {
@@ -116,29 +132,34 @@ class SmbRemoteStorage(
     }
 
     override suspend fun writeAtomic(path: String, content: Source): Unit = withContext(Dispatchers.IO) {
-        val disk = share()
-        val finalPath = smbPath(path)
-        val tmpPath = tempSibling(finalPath)
-        ensureParentDirs(disk, path)
+        // The outer try owns [content]: connect/validate/mkdir can all fail, and
+        // without it each failed action would leak the caller's open source.
         try {
-            // Open the temp file ONCE with DELETE access, stream into it, then rename
-            // over the target on the SAME handle. Renaming (SET_INFO FileRename) needs
-            // DELETE on the open handle; doing it on the write handle guarantees that.
-            disk.openFile(
-                tmpPath,
-                EnumSet.of(AccessMask.GENERIC_WRITE, AccessMask.GENERIC_READ, AccessMask.DELETE),
-                null,
-                SMB2ShareAccess.ALL,
-                SMB2CreateDisposition.FILE_OVERWRITE_IF,
-                null,
-            ).use { tmp ->
-                val bytes = content.buffer().use { it.readByteArray() }
-                tmp.write(bytes, 0)
-                renameReplacing(disk, tmp, finalPath)
+            val disk = share()
+            val finalPath = smbPath(path)
+            val tmpPath = tempSibling(finalPath)
+            ensureParentDirs(disk, path)
+            try {
+                // Open the temp file ONCE with DELETE access, stream into it, then rename
+                // over the target on the SAME handle. Renaming (SET_INFO FileRename) needs
+                // DELETE on the open handle; doing it on the write handle guarantees that.
+                disk.openFile(
+                    tmpPath,
+                    EnumSet.of(AccessMask.GENERIC_WRITE, AccessMask.GENERIC_READ, AccessMask.DELETE),
+                    null,
+                    SMB2ShareAccess.ALL,
+                    SMB2CreateDisposition.FILE_OVERWRITE_IF,
+                    null,
+                ).use { tmp ->
+                    val bytes = content.buffer().use { it.readByteArray() }
+                    tmp.write(bytes, 0)
+                    renameReplacing(disk, tmp, finalPath)
+                }
+            } finally {
+                runCatching { if (disk.fileExists(tmpPath)) disk.rm(tmpPath) }
             }
         } finally {
             content.close()
-            runCatching { if (disk.fileExists(tmpPath)) disk.rm(tmpPath) }
         }
     }
 
@@ -277,7 +298,10 @@ class SmbRemoteStorage(
         return if (dir.isEmpty()) name else "$dir\\$name"
     }
 
-    private fun isTempName(name: String): Boolean = name.startsWith(".") && name.contains(".tmp-")
+    // Match ONLY the exact generated shape above. Anything looser would silently
+    // exclude — and after an hour delete — real user files whose names merely
+    // resemble a temp (e.g. ".env.tmp-backup").
+    private fun isTempName(name: String): Boolean = TEMP_NAME_REGEX.matches(name)
 
     /**
      * Remote push via SMB2 CHANGE_NOTIFY on a dedicated watch connection. Transient
@@ -295,7 +319,7 @@ class SmbRemoteStorage(
                 val currentClient = secureClient()
                 watchClient = currentClient
                 try {
-                    val conn = currentClient.connect(config.host, config.port)
+                    val conn = connectEncrypted(currentClient)
                     watchConn = conn
                     val session = conn.authenticate(
                         AuthenticationContext(config.username, config.password.toCharArray(), config.domain),
@@ -374,12 +398,21 @@ class SmbRemoteStorage(
         /** How old an orphaned writeAtomic temp must be before scan removes it. */
         const val STALE_TEMP_AGE_MS = 60 * 60_000L
 
+        /** Exactly the ".<name>.tmp-<nano>" shape produced by [tempSibling]. */
+        val TEMP_NAME_REGEX = Regex("""^\..+\.tmp-\d+$""")
+
         /**
          * smbj defaults leave message signing and encryption OFF, so an on-network
-         * attacker could read or tamper with synced content in transit. Require both.
+         * attacker could read or tamper with synced content in transit. Require both,
+         * and offer only SMB 3.x dialects: `withEncryptData` is honored solely on a
+         * 3.x session, so the default dialect list would let a 2.x-only server — or
+         * an active MITM downgrading the unauthenticated pre-3.1.1 NEGOTIATE — read
+         * everything in plaintext. With 3.x only, such a connection fails instead;
+         * `connectEncrypted` covers the remaining 3.x-without-encryption case.
          */
         fun secureClient(): SMBClient = SMBClient(
             SmbjConfig.builder()
+                .withDialects(SMB2Dialect.SMB_3_1_1, SMB2Dialect.SMB_3_0_2, SMB2Dialect.SMB_3_0)
                 .withSigningRequired(true)
                 .withEncryptData(true)
                 .build(),
