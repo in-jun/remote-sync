@@ -67,7 +67,9 @@ class DirectFileLocalStorage(private val root: File) : Storage {
     }
 
     override suspend fun delete(path: String): Unit = withContext(Dispatchers.IO) {
-        resolve(path).delete()
+        // Throws on failure so the executor keeps the ancestor and retries,
+        // instead of committing a delete that never happened.
+        Files.deleteIfExists(resolve(path).toPath())
         Unit
     }
 
