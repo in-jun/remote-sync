@@ -13,6 +13,7 @@ import dagger.hilt.android.AndroidEntryPoint
 import dev.injun.remotesync.data.config.ConfigRepository
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -85,7 +86,13 @@ class SyncForegroundService : Service() {
         // The safety poll retries once Wi-Fi returns; skipped pushes are caught then.
         if (!networkGate.allowsSync(config.settings.value)) return
         for (pair in config.pairs.value) {
-            runCatching { syncManager.syncOnce(pair) }
+            try {
+                syncManager.syncOnce(pair)
+            } catch (e: CancellationException) {
+                throw e // service is shutting down — stop the pass
+            } catch (_: Exception) {
+                // SyncManager recorded the failure; keep syncing the other pairs.
+            }
         }
     }
 

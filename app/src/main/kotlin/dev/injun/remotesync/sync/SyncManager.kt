@@ -3,11 +3,13 @@ package dev.injun.remotesync.sync
 import dev.injun.remotesync.core.exec.SyncExecutor
 import dev.injun.remotesync.core.exec.SyncResult
 import dev.injun.remotesync.core.safety.MaxDeleteGuard
+import dev.injun.remotesync.data.config.ConfigRepository
 import dev.injun.remotesync.data.config.SyncStateStore
 import dev.injun.remotesync.data.db.AncestorDao
 import dev.injun.remotesync.data.db.RoomAncestorStore
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -26,13 +28,16 @@ class SyncManager @Inject constructor(
     private val syncState: SyncStateStore,
     private val alerts: SyncAlertNotifier,
     private val storages: StorageFactory,
+    private val config: ConfigRepository,
 ) {
     private val lock = Mutex()
 
     suspend fun syncOnce(pair: SyncPair): SyncResult = lock.withLock {
+        config.awaitLoaded()
         val local = storages.local(pair)
         val ancestors = RoomAncestorStore(ancestorDao, pair.id)
-        val guard = MaxDeleteGuard(threshold = pair.maxDeleteThreshold)
+        // The guard threshold is the global setting shown in Settings: one source of truth.
+        val guard = MaxDeleteGuard(threshold = config.settings.value.maxDeleteThreshold)
         try {
             storages.remote(pair.remote).use { remote ->
                 val result = SyncExecutor(local, remote, ancestors, guard = guard).sync()
@@ -47,6 +52,10 @@ class SyncManager @Inject constructor(
                 }
                 result
             }
+        } catch (e: CancellationException) {
+            // Routine cancellation (mode switch, worker stop) is not a sync failure:
+            // recording it would poison the last-sync state and the failure alert count.
+            throw e
         } catch (e: Exception) {
             syncState.record(pair.id, "Failed: ${e.message ?: e.javaClass.simpleName}")
             alerts.recordFailure(pair)

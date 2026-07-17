@@ -6,7 +6,6 @@ data class SyncPair(
     val name: String,
     val localRoot: String,
     val remote: RemoteConfig,
-    val maxDeleteThreshold: Double = 0.5,
 ) {
     val protocol: Protocol get() = remote.protocol
 }
