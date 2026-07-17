@@ -62,6 +62,11 @@ private fun AppRoot(viewModel: MainViewModel) {
     val canNotify = rememberNotificationAccess()
     val requestNotificationAccess = rememberNotificationAccessRequest()
 
+    // pairs starts empty until the encrypted store loads; picking a start screen
+    // before then would drop a configured user on the protocol picker.
+    val configLoaded by viewModel.configLoaded.collectAsState()
+    if (!configLoaded) return
+
     var screen by remember { mutableStateOf(if (pairs.isEmpty()) Screen.PROTOCOL else Screen.HOME) }
     var editingId by remember { mutableStateOf<Long?>(null) }
     // Protocol chosen for a NEW pair (picked before the form).

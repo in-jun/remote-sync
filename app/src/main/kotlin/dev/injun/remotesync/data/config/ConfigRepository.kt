@@ -56,11 +56,17 @@ class ConfigRepository @Inject constructor(
     private val _settings = MutableStateFlow(AppSettings())
     val settings: StateFlow<AppSettings> = _settings.asStateFlow()
 
+    private val _isLoaded = MutableStateFlow(false)
+
+    /** Observable form of [awaitLoaded] for UI that cannot suspend before composing. */
+    val isLoaded: StateFlow<Boolean> = _isLoaded.asStateFlow()
+
     private val writeMutex = Mutex()
 
     private val loaded: Deferred<Unit> = CoroutineScope(Dispatchers.IO).async {
         _pairs.value = loadPairs()
         _settings.value = loadSettings()
+        _isLoaded.value = true
     }
 
     /** Suspends until the persisted pairs and settings have been read from disk. */
