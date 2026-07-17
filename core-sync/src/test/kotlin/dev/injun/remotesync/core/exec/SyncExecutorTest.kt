@@ -3,8 +3,10 @@ package dev.injun.remotesync.core.exec
 import dev.injun.remotesync.core.fake.InMemoryAncestorStore
 import dev.injun.remotesync.core.fake.InMemoryStorage
 import dev.injun.remotesync.core.model.ConflictKind
+import dev.injun.remotesync.core.safety.MaxDeleteGuard
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertInstanceOf
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -88,6 +90,101 @@ class SyncExecutorTest {
         assertEquals("edited", local.contentOf("note.txt"))
         assertEquals("edited", remote.contentOf("note.txt"))
         assertEquals(0, (exec.sync() as SyncResult.Success).actionsApplied)
+    }
+
+    @Test
+    fun `remote coming back empty aborts before touching local files`() = runTest {
+        val (local, remote, anc) = fixture()
+        for (i in 1..6) local.seed("f$i.txt", "content-$i")
+        val exec = SyncExecutor(local, remote, anc)
+        exec.sync() // baseline: all files on both sides, ancestors recorded
+
+        // Remote scan returns nothing (e.g. the share failed to mount), so the
+        // plan would delete every local file. The guard must refuse the pass.
+        for (p in remote.paths()) remote.deleteForTest(p)
+        val ancestorsBefore = anc.load()
+
+        val result = exec.sync()
+
+        val aborted = assertInstanceOf(SyncResult.Aborted::class.java, result)
+        assertEquals(MaxDeleteGuard.Side.LOCAL, aborted.verdict.side)
+        assertEquals((1..6).map { "f$it.txt" }.toSet(), local.paths())
+        for (i in 1..6) assertEquals("content-$i", local.contentOf("f$i.txt"))
+        assertEquals(ancestorsBefore, anc.load())
+    }
+
+    @Test
+    fun `remote deletions under the safety threshold still propagate`() = runTest {
+        val (local, remote, anc) = fixture()
+        for (i in 1..12) local.seed("f$i.txt", "content-$i")
+        val exec = SyncExecutor(local, remote, anc)
+        exec.sync()
+
+        // 5 of 12 (~42%) is over the minimum trigger but under the 50% threshold.
+        for (i in 1..5) remote.deleteForTest("f$i.txt")
+
+        val result = exec.sync() as SyncResult.Success
+
+        assertEquals(5, result.actionsApplied)
+        assertEquals((6..12).map { "f$it.txt" }.toSet(), local.paths())
+    }
+
+    @Test
+    fun `local delete is skipped when the file was edited after the scan`() = runTest {
+        val (local, remote, anc) = fixture()
+        local.seed("a.txt", "v0")
+        val exec = SyncExecutor(local, remote, anc)
+        exec.sync()
+        remote.deleteForTest("a.txt") // remote deletion → plan: delete local
+
+        // The file is re-edited between the scan and the apply loop.
+        remote.afterScanForTest = { local.seed("a.txt", "edited-after-scan") }
+        val ancestorsBefore = anc.load()
+
+        val result = exec.sync() as SyncResult.Success
+
+        assertEquals(listOf("a.txt"), result.skippedPaths)
+        assertEquals(0, result.actionsApplied)
+        assertEquals("edited-after-scan", local.contentOf("a.txt"))
+        assertEquals(ancestorsBefore["a.txt"], anc.load()["a.txt"])
+
+        // Next pass sees the edit and re-plans it as modify-vs-delete.
+        remote.afterScanForTest = null
+        val next = exec.sync() as SyncResult.Success
+        assertEquals(ConflictKind.MODIFY_DELETE, next.conflicts.single().kind)
+        assertEquals("edited-after-scan", local.contentOf("a.txt"))
+        assertEquals("edited-after-scan", remote.contentOf("a.txt"))
+    }
+
+    @Test
+    fun `modify-delete resolution is skipped when the remote file reappears after the scan`() = runTest {
+        val (local, remote, anc) = fixture()
+        local.seed("note.txt", "v0")
+        val exec = SyncExecutor(local, remote, anc)
+        exec.sync()
+
+        local.seed("note.txt", "edited")
+        remote.deleteForTest("note.txt")
+        // The remote file is re-created between the scan and the apply loop;
+        // writing over it would destroy content no snapshot ever saw.
+        remote.afterScanForTest = { remote.seed("note.txt", "reappeared") }
+        val ancestorsBefore = anc.load()
+
+        val result = exec.sync() as SyncResult.Success
+
+        assertEquals(listOf("note.txt"), result.skippedPaths)
+        assertEquals(0, result.actionsApplied)
+        assertEquals("reappeared", remote.contentOf("note.txt"))
+        assertEquals(ancestorsBefore["note.txt"], anc.load()["note.txt"])
+
+        // Next pass re-plans it as modify-modify and preserves both versions.
+        remote.afterScanForTest = null
+        val next = exec.sync() as SyncResult.Success
+        val report = next.conflicts.single()
+        assertEquals(ConflictKind.MODIFY_MODIFY, report.kind)
+        assertEquals("edited", local.contentOf("note.txt"))
+        val copy = requireNotNull(report.conflictCopyPath)
+        assertEquals("reappeared", local.contentOf(copy))
     }
 
     @Test
