@@ -42,6 +42,9 @@ class MainViewModel @Inject constructor(
     val pairs = config.pairs
     val settings = config.settings
 
+    /** False until the encrypted store has been read; [pairs] is empty before then. */
+    val configLoaded = config.isLoaded
+
     /** Durable last-sync per pair (updated by manual and background syncs alike). */
     val lastSync = syncState.lastSync
 
