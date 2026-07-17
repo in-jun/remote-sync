@@ -21,6 +21,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.app.ActivityCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -89,6 +90,72 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
     is Activity -> this
     is ContextWrapper -> baseContext.findActivity()
     else -> null
+}
+
+/**
+ * True if the app may post notifications: the POST_NOTIFICATIONS runtime grant on
+ * API 33+ and the user-level notification toggle on every API level. Without it the
+ * sync-abort and repeated-failure alerts are silently dropped.
+ */
+fun canPostNotifications(context: Context): Boolean =
+    NotificationManagerCompat.from(context).areNotificationsEnabled()
+
+/**
+ * Returns an action that requests notification access: the POST_NOTIFICATIONS
+ * runtime prompt on API 33+, the app's notification settings page otherwise. If the
+ * prompt can no longer be shown ("don't ask again"), falls back to the settings page
+ * so the banner button never becomes a dead end.
+ */
+@Composable
+fun rememberNotificationAccessRequest(): () -> Unit {
+    val context = LocalContext.current
+    val launcher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        val activity = context.findActivity()
+        if (!granted && activity != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            !ActivityCompat.shouldShowRequestPermissionRationale(
+                activity,
+                Manifest.permission.POST_NOTIFICATIONS,
+            )
+        ) {
+            openNotificationSettings(context)
+        }
+    }
+    return {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            launcher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            // Permission granted (or pre-33) but notifications disabled in settings.
+            openNotificationSettings(context)
+        }
+    }
+}
+
+private fun openNotificationSettings(context: Context) {
+    context.startActivity(
+        Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+            .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName),
+    )
+}
+
+/** Recomputes notification access on each ON_RESUME. */
+@Composable
+fun rememberNotificationAccess(): Boolean {
+    val context = LocalContext.current
+    var granted by remember { mutableStateOf(canPostNotifications(context)) }
+    val owner = LocalLifecycleOwner.current
+    DisposableEffect(owner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) granted = canPostNotifications(context)
+        }
+        owner.lifecycle.addObserver(observer)
+        onDispose { owner.lifecycle.removeObserver(observer) }
+    }
+    return granted
 }
 
 /**

@@ -1,5 +1,6 @@
 package dev.injun.remotesync
 
+import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -23,6 +24,8 @@ import dagger.hilt.android.AndroidEntryPoint
 import dev.injun.remotesync.sync.Protocol
 import dev.injun.remotesync.ui.MainViewModel
 import dev.injun.remotesync.ui.rememberAllFilesAccess
+import dev.injun.remotesync.ui.rememberNotificationAccess
+import dev.injun.remotesync.ui.rememberNotificationAccessRequest
 import dev.injun.remotesync.ui.rememberStorageAccessRequest
 import dev.injun.remotesync.ui.screens.ConflictsScreen
 import dev.injun.remotesync.ui.screens.HomeScreen
@@ -56,6 +59,8 @@ private fun AppRoot(viewModel: MainViewModel) {
     val conflicts by viewModel.conflicts.collectAsState()
     val hasAccess = rememberAllFilesAccess()
     val requestStorageAccess = rememberStorageAccessRequest()
+    val canNotify = rememberNotificationAccess()
+    val requestNotificationAccess = rememberNotificationAccessRequest()
 
     var screen by remember { mutableStateOf(if (pairs.isEmpty()) Screen.PROTOCOL else Screen.HOME) }
     var editingId by remember { mutableStateOf<Long?>(null) }
@@ -118,8 +123,18 @@ private fun AppRoot(viewModel: MainViewModel) {
                 protocol = existing?.protocol ?: newProtocol,
                 existing = existing,
                 onSave = { pair ->
+                    val firstPair = pairs.isEmpty()
                     viewModel.upsertPair(pair)
                     screen = Screen.HOME
+                    // First pair set up: ask for POST_NOTIFICATIONS (API 33+) so
+                    // abort/failure alerts are not silently dropped. Below 33 the
+                    // permission does not exist; the Home banner covers a manual
+                    // opt-out there.
+                    if (firstPair && !canNotify &&
+                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                    ) {
+                        requestNotificationAccess()
+                    }
                 },
                 onDelete = if (existing != null) {
                     { viewModel.deletePair(existing.id); screen = Screen.HOME }
@@ -147,9 +162,11 @@ private fun AppRoot(viewModel: MainViewModel) {
             syncing = syncing,
             lastSync = lastSync,
             hasAllFilesAccess = hasAccess,
+            canPostNotifications = canNotify,
             conflictCount = conflicts.size,
             onOpenConflicts = { screen = Screen.CONFLICTS },
             onRequestPermission = requestStorageAccess,
+            onRequestNotifications = requestNotificationAccess,
             onSyncPair = viewModel::syncPair,
             onSyncAll = viewModel::syncAll,
             onAddPair = { screen = Screen.PROTOCOL },

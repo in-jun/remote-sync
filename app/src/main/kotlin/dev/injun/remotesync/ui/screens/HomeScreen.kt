@@ -48,9 +48,11 @@ fun HomeScreen(
     syncing: Set<Long>,
     lastSync: Map<Long, LastSync>,
     hasAllFilesAccess: Boolean,
+    canPostNotifications: Boolean,
     conflictCount: Int,
     onOpenConflicts: () -> Unit,
     onRequestPermission: () -> Unit,
+    onRequestNotifications: () -> Unit,
     onSyncPair: (Long) -> Unit,
     onSyncAll: () -> Unit,
     onAddPair: () -> Unit,
@@ -79,6 +81,9 @@ fun HomeScreen(
         ) {
             if (!hasAllFilesAccess) {
                 item { PermissionBanner(onRequestPermission) }
+            }
+            if (!canPostNotifications) {
+                item { NotificationBanner(onRequestNotifications) }
             }
             if (conflictCount > 0) {
                 item { ConflictBanner(conflictCount, onOpenConflicts) }
@@ -172,6 +177,27 @@ private fun PermissionBanner(onRequestPermission: () -> Unit) {
                 modifier = Modifier.padding(vertical = 8.dp),
             )
             FilledTonalButton(onClick = onRequestPermission) { Text("Open permission settings") }
+        }
+    }
+}
+
+@Composable
+private fun NotificationBanner(onRequestNotifications: () -> Unit) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Warning, contentDescription = null)
+                Text("  Notifications disabled", style = MaterialTheme.typography.titleSmall)
+            }
+            Text(
+                "Sync-stopped and repeated-failure alerts cannot be shown. A stalled sync would go unnoticed until you open the app.",
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(vertical = 8.dp),
+            )
+            FilledTonalButton(onClick = onRequestNotifications) { Text("Allow notifications") }
         }
     }
 }
