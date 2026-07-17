@@ -2,6 +2,7 @@ package dev.injun.remotesync.data.config
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -23,6 +24,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
+import org.json.JSONException
 import org.json.JSONObject
 
 /**
@@ -61,11 +63,27 @@ class ConfigRepository @Inject constructor(
     /** Observable form of [awaitLoaded] for UI that cannot suspend before composing. */
     val isLoaded: StateFlow<Boolean> = _isLoaded.asStateFlow()
 
+    private val _loadError = MutableStateFlow(false)
+
+    /**
+     * True when the persisted config could not be fully read (Keystore failure or
+     * malformed pair JSON). Unreadable pair JSON is preserved under [KEY_PAIRS_BACKUP]
+     * so a later save cannot destroy it.
+     */
+    val loadError: StateFlow<Boolean> = _loadError.asStateFlow()
+
     private val writeMutex = Mutex()
 
+    // Never let the load fail: a cached exception here would rethrow from every
+    // awaitLoaded() call and crash-loop the START_STICKY foreground service.
     private val loaded: Deferred<Unit> = CoroutineScope(Dispatchers.IO).async {
-        _pairs.value = loadPairs()
-        _settings.value = loadSettings()
+        runCatching {
+            _pairs.value = loadPairs()
+            _settings.value = loadSettings()
+        }.onFailure {
+            Log.e(TAG, "Failed to load config", it)
+            _loadError.value = true
+        }
         _isLoaded.value = true
     }
 
@@ -160,30 +178,49 @@ class ConfigRepository @Inject constructor(
     private fun loadPairs(): List<SyncPair> {
         val json = prefs.getString(KEY_PAIRS, null)
         if (json == null) return migrateLegacy()
-        return runCatching {
-            val arr = JSONArray(json)
-            (0 until arr.length()).map { i ->
-                val o = arr.getJSONObject(i)
-                val protocol = runCatching { Protocol.valueOf(o.optString("protocol")) }
-                    .getOrDefault(Protocol.SMB)
-                SyncPair(
-                    id = o.getLong("id"),
-                    name = o.optString("name", "Folder pair"),
-                    localRoot = o.optString("localRoot"),
-                    remote = when (protocol) {
-                        Protocol.SMB -> SmbConfig(
-                            host = o.optString("host"),
-                            port = o.optInt("port", 445),
-                            shareName = o.optString("share"),
-                            domain = o.optString("domain"),
-                            username = o.optString("user"),
-                            password = o.optString("pass"),
-                            rootPath = o.optString("rootPath"),
-                        )
-                    },
+        val arr = try {
+            JSONArray(json)
+        } catch (e: JSONException) {
+            Log.e(TAG, "Pair list JSON is unreadable", e)
+            backupUnreadablePairs(json)
+            return emptyList()
+        }
+        // Parse per entry so one malformed pair drops only itself, not the whole list.
+        val pairs = (0 until arr.length()).mapNotNull { i ->
+            runCatching { parsePair(arr.getJSONObject(i)) }
+                .onFailure { Log.e(TAG, "Skipping malformed pair entry $i", it) }
+                .getOrNull()
+        }
+        if (pairs.size < arr.length()) backupUnreadablePairs(json)
+        return pairs
+    }
+
+    private fun parsePair(o: JSONObject): SyncPair {
+        val protocol = runCatching { Protocol.valueOf(o.optString("protocol")) }
+            .getOrDefault(Protocol.SMB)
+        return SyncPair(
+            id = o.getLong("id"),
+            name = o.optString("name", "Folder pair"),
+            localRoot = o.optString("localRoot"),
+            remote = when (protocol) {
+                Protocol.SMB -> SmbConfig(
+                    host = o.optString("host"),
+                    port = o.optInt("port", 445),
+                    shareName = o.optString("share"),
+                    domain = o.optString("domain"),
+                    username = o.optString("user"),
+                    password = o.optString("pass"),
+                    rootPath = o.optString("rootPath"),
                 )
-            }
-        }.getOrDefault(emptyList())
+            },
+        )
+    }
+
+    // Keep the raw JSON so credentials in unparseable entries survive: the next
+    // persist() overwrites KEY_PAIRS with only the pairs that loaded.
+    private fun backupUnreadablePairs(json: String) {
+        prefs.edit().putString(KEY_PAIRS_BACKUP, json).apply()
+        _loadError.value = true
     }
 
     /** One-time migration from the original single-pair key layout. */
@@ -216,7 +253,9 @@ class ConfigRepository @Inject constructor(
     )
 
     private companion object {
+        const val TAG = "ConfigRepository"
         const val KEY_PAIRS = "pairs_json"
+        const val KEY_PAIRS_BACKUP = "pairs_json_backup"
         const val KEY_NEXT_ID = "next_pair_id"
         const val KEY_MODE = "mode"
         const val KEY_INTERVAL = "interval"

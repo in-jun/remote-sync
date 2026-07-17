@@ -65,6 +65,10 @@ class MainViewModel @Inject constructor(
     init {
         viewModelScope.launch {
             config.awaitLoaded()
+            if (config.loadError.value) {
+                _error.value = "Some saved configuration could not be read; " +
+                    "check folder pairs before syncing"
+            }
             scheduler.apply(config.settings.value, config.isConfigured)
         }
         refreshConflicts()

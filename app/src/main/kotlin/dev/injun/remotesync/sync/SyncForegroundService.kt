@@ -7,6 +7,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import dagger.hilt.android.AndroidEntryPoint
@@ -14,6 +15,7 @@ import dev.injun.remotesync.data.config.ConfigRepository
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -45,7 +47,15 @@ class SyncForegroundService : Service() {
     @Inject lateinit var networkGate: NetworkGate
     @Inject lateinit var changeTriggers: ChangeTriggers
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    // Backstop: an escaped exception should stop the service, not crash the process
+    // into a START_STICKY restart loop.
+    private val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.Default +
+            CoroutineExceptionHandler { _, e ->
+                Log.e(TAG, "Sync loop failed", e)
+                stopSelf()
+            },
+    )
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -131,6 +141,7 @@ class SyncForegroundService : Service() {
             .build()
 
     private companion object {
+        const val TAG = "SyncForegroundService"
         const val CHANNEL_ID = "sync_status"
         const val NOTIFICATION_ID = 1001
         const val DEBOUNCE_MS = 1500L
