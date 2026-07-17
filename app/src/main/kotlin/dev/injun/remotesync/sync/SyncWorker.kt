@@ -8,6 +8,7 @@ import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
 import dev.injun.remotesync.core.exec.SyncResult
 import dev.injun.remotesync.data.config.ConfigRepository
+import kotlinx.coroutines.CancellationException
 
 /**
  * Periodic background sync of all pairs. Transient failures return [Result.retry]
@@ -35,6 +36,8 @@ class SyncWorker @AssistedInject constructor(
                         if (result.failures.isNotEmpty()) transientFailure = true
                     is SyncResult.Aborted -> Unit // SyncManager notified the user; don't retry
                 }
+            } catch (e: CancellationException) {
+                throw e // WorkManager is stopping the worker — don't keep syncing pairs
             } catch (e: Exception) {
                 transientFailure = true // network/server hiccup — retry the batch later
             }

@@ -149,7 +149,6 @@ fun SetupScreen(
                             id = existing?.id ?: 0L,
                             name = name.trim().ifBlank { "Folder pair" },
                             localRoot = localRoot.trim(),
-                            maxDeleteThreshold = existing?.maxDeleteThreshold ?: 0.5,
                             remote = SmbConfig(
                                 host = host.trim(),
                                 port = port.toIntOrNull() ?: 445,

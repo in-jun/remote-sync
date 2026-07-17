@@ -140,7 +140,6 @@ class ConfigRepository @Inject constructor(
                     put("name", p.name)
                     put("protocol", p.protocol.name)
                     put("localRoot", p.localRoot)
-                    put("maxDelete", p.maxDeleteThreshold)
                     when (val r = p.remote) {
                         is SmbConfig -> {
                             put("host", r.host)
@@ -171,7 +170,6 @@ class ConfigRepository @Inject constructor(
                     id = o.getLong("id"),
                     name = o.optString("name", "Folder pair"),
                     localRoot = o.optString("localRoot"),
-                    maxDeleteThreshold = o.optDouble("maxDelete", 0.5),
                     remote = when (protocol) {
                         Protocol.SMB -> SmbConfig(
                             host = o.optString("host"),

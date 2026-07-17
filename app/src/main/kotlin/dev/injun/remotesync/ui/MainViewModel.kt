@@ -17,6 +17,7 @@ import dev.injun.remotesync.sync.SyncMode
 import dev.injun.remotesync.sync.SyncPair
 import dev.injun.remotesync.sync.SyncScheduler
 import javax.inject.Inject
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
@@ -145,8 +146,11 @@ class MainViewModel @Inject constructor(
         if (id in _syncing.value) return
         _syncing.value = _syncing.value + id
         viewModelScope.launch {
-            runCatching { syncManager.syncOnce(target) }
-            _syncing.value = _syncing.value - id
+            try {
+                trySync(target)
+            } finally {
+                _syncing.value = _syncing.value - id
+            }
             refreshConflicts()
         }
     }
@@ -158,8 +162,11 @@ class MainViewModel @Inject constructor(
             for (pair in config.pairs.value) {
                 if (pair.id in _syncing.value) continue
                 _syncing.value = _syncing.value + pair.id
-                runCatching { syncManager.syncOnce(pair) }
-                _syncing.value = _syncing.value - pair.id
+                try {
+                    trySync(pair)
+                } finally {
+                    _syncing.value = _syncing.value - pair.id
+                }
             }
             refreshConflicts()
         }
@@ -190,7 +197,7 @@ class MainViewModel @Inject constructor(
             }.onFailure { _error.value = errorText("Could not resolve conflict", it) }
             refreshConflicts()
             if (resolved.isSuccess) {
-                runCatching { syncManager.syncOnce(pair) }
+                trySync(pair)
                 refreshConflicts()
             }
         }
@@ -198,6 +205,19 @@ class MainViewModel @Inject constructor(
 
     fun clearError() {
         _error.value = null
+    }
+
+    /**
+     * Runs one pass, swallowing sync errors (SyncManager already records and surfaces
+     * them) but letting cancellation propagate so a dying scope stops the loop.
+     */
+    private suspend fun trySync(pair: SyncPair) {
+        try {
+            syncManager.syncOnce(pair)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+        }
     }
 
     private fun errorText(what: String, e: Throwable): String =
