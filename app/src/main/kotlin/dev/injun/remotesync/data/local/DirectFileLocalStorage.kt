@@ -1,7 +1,7 @@
 package dev.injun.remotesync.data.local
 
-import dev.injun.remotesync.core.model.FileMeta
 import dev.injun.remotesync.core.model.Snapshot
+import dev.injun.remotesync.core.port.ContentHash
 import dev.injun.remotesync.core.port.RawEntry
 import dev.injun.remotesync.core.port.SnapshotBuilder
 import dev.injun.remotesync.core.port.Storage
@@ -11,7 +11,6 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
-import java.security.MessageDigest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -118,11 +117,6 @@ class DirectFileLocalStorage(private val root: File) : Storage {
         Unit
     }
 
-    override suspend fun stat(path: String): FileMeta? = withContext(Dispatchers.IO) {
-        val f = resolve(path)
-        if (!f.isFile) null else FileMeta(f.length(), f.lastModified(), hashFile(f))
-    }
-
     override suspend fun probe(path: String): RawEntry? = withContext(Dispatchers.IO) {
         val f = resolve(path)
         if (!f.isFile) null else RawEntry(path, f.length(), f.lastModified())
@@ -146,16 +140,5 @@ class DirectFileLocalStorage(private val root: File) : Storage {
         return f
     }
 
-    private fun hashFile(f: File): String {
-        val md = MessageDigest.getInstance("SHA-256")
-        f.inputStream().use { ins ->
-            val buf = ByteArray(1 shl 16)
-            while (true) {
-                val n = ins.read(buf)
-                if (n < 0) break
-                md.update(buf, 0, n)
-            }
-        }
-        return md.digest().joinToString("") { "%02x".format(it) }
-    }
+    private fun hashFile(f: File): String = ContentHash.sha256Hex(f.source())
 }

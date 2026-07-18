@@ -19,6 +19,10 @@ interface Storage {
     /**
      * Build a hashed snapshot. Implementations may reuse a hash from [hint] when a
      * file's size+mtime are unchanged, avoiding re-hashing unmodified files.
+     *
+     * Every entry's [FileMeta.contentHash] MUST be produced by [ContentHash.sha256Hex]
+     * — the engine compares hashes from different backends directly, so hashing any
+     * other way silently breaks cross-side content comparison.
      */
     suspend fun scan(hint: Snapshot = Snapshot.EMPTY): Snapshot
 
@@ -40,12 +44,10 @@ interface Storage {
     /** Atomically rename [from] to [to], replacing [to] if present. */
     suspend fun move(from: String, to: String)
 
-    suspend fun stat(path: String): FileMeta?
-
     /**
-     * Cheap size/mtime lookup with NO content hash ([stat] on a remote reads the whole
-     * file to hash it); null if [path] is not a regular file. The executor uses this to
-     * re-verify a target immediately before a destructive operation.
+     * Cheap size/mtime lookup with NO content hash; null if [path] is not a regular
+     * file. The executor uses this to re-verify a target immediately before a
+     * destructive operation.
      */
     suspend fun probe(path: String): RawEntry?
 

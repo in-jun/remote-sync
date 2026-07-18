@@ -298,7 +298,7 @@ class SyncExecutorTest {
         assertTrue(result.failures.isEmpty() && result.skippedPaths.isEmpty())
         val after = requireNotNull(anc.load()["a.txt"])
         assertNotEquals(before.local.mtimeMillis, after.local.mtimeMillis)
-        assertEquals(requireNotNull(local.stat("a.txt")).mtimeMillis, after.local.mtimeMillis)
+        assertEquals(requireNotNull(local.probe("a.txt")).mtimeMillis, after.local.mtimeMillis)
         assertEquals(before.local.contentHash, after.local.contentHash)
         assertEquals(before.remote, after.remote)
     }

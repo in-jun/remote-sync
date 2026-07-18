@@ -76,11 +76,11 @@ class SmbRemoteStorageIntegrationTest {
             // move
             smb.move("vault/db.kdbx", "vault/renamed.kdbx")
             assertEquals("secret-v2", readText(smb, "vault/renamed.kdbx"))
-            assertNull(smb.stat("vault/db.kdbx"))
+            assertNull(smb.probe("vault/db.kdbx"))
 
             // delete
             smb.delete("vault/renamed.kdbx")
-            assertNull(smb.stat("vault/renamed.kdbx"))
+            assertNull(smb.probe("vault/renamed.kdbx"))
         }
     }
 
