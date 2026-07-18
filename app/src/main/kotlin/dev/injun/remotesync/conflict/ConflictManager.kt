@@ -90,15 +90,16 @@ class ConflictManager @Inject constructor() {
         if (!copy.isFile) return@withContext // already resolved
 
         // The user decided from the state captured at scan time, but a background sync
-        // can rewrite the canonical file in between (e.g. pull a newer remote version).
-        // Discarding or overwriting content the user never saw would lose it on both
-        // replicas, so re-verify before the destructive resolutions and make the user
-        // review the fresh state instead. KEEP_BOTH preserves everything and needs no
-        // check.
+        // can rewrite the canonical file or the conflict copy in between (both are
+        // ordinary synced paths). Discarding or overwriting content the user never saw
+        // would lose it on both replicas, so re-verify before the destructive
+        // resolutions and make the user review the fresh state instead. KEEP_BOTH
+        // preserves everything and needs no check.
         if (resolution != ConflictResolution.KEEP_BOTH) {
             val exists = canonical.isFile
             val changed = exists != item.canonicalExists ||
-                (exists && (canonical.length() != item.localSize || canonical.lastModified() != item.localMtime))
+                (exists && (canonical.length() != item.localSize || canonical.lastModified() != item.localMtime)) ||
+                copy.length() != item.remoteSize || copy.lastModified() != item.remoteMtime
             if (changed) throw StaleConflictException()
         }
 
