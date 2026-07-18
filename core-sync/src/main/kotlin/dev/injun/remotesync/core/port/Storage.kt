@@ -24,8 +24,15 @@ interface Storage {
 
     suspend fun read(path: String): Source
 
-    /** Atomically write [content] to [path]; takes ownership of and closes [content]. */
-    suspend fun writeAtomic(path: String, content: Source)
+    /**
+     * Atomically write [content] to [path]; takes ownership of and closes [content].
+     * Returns the size/mtime of the file this write produced, observed on the written
+     * file itself (the temp before its rename, or the still-open handle) — NOT by
+     * re-looking-up [path] afterwards — so the caller can attribute the stat to this
+     * write even if another writer replaces the path immediately after. Null when the
+     * backend cannot observe it; callers then fall back to re-hashing later.
+     */
+    suspend fun writeAtomic(path: String, content: Source): RawEntry?
 
     /** Delete [path] if present (idempotent). */
     suspend fun delete(path: String)
@@ -38,8 +45,7 @@ interface Storage {
     /**
      * Cheap size/mtime lookup with NO content hash ([stat] on a remote reads the whole
      * file to hash it); null if [path] is not a regular file. The executor uses this to
-     * re-verify a target immediately before a destructive operation and to record the
-     * destination's own stat after a transfer.
+     * re-verify a target immediately before a destructive operation.
      */
     suspend fun probe(path: String): RawEntry?
 

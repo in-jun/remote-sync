@@ -13,6 +13,7 @@ import dev.injun.remotesync.core.model.Snapshot
 import dev.injun.remotesync.core.model.SyncAction
 import dev.injun.remotesync.core.port.AncestorRecord
 import dev.injun.remotesync.core.port.AncestorStore
+import dev.injun.remotesync.core.port.RawEntry
 import dev.injun.remotesync.core.port.Storage
 import dev.injun.remotesync.core.safety.MaxDeleteGuard
 import dev.injun.remotesync.core.safety.SafetyVerdict
@@ -91,13 +92,16 @@ class SyncExecutor(
         when (action) {
             is Push -> {
                 if (!unchangedSinceScan(remote, action.path, remoteSnap[action.path])) return Outcome.Skipped
-                remote.writeAtomic(action.path, local.read(action.path))
-                commit(action.path, action.local, writtenMeta(remote, action.path, action.local))
+                // read().use { write }: writeAtomic closes the source, but only once its
+                // block actually runs — cancellation can land on the dispatch boundary
+                // before that, and without the use{} the open descriptor would leak.
+                val written = local.read(action.path).use { remote.writeAtomic(action.path, it) }
+                commit(action.path, action.local, writtenMeta(written, action.local))
             }
             is Pull -> {
                 if (!unchangedSinceScan(local, action.path, localSnap[action.path])) return Outcome.Skipped
-                local.writeAtomic(action.path, remote.read(action.path))
-                commit(action.path, writtenMeta(local, action.path, action.remote), action.remote)
+                val written = remote.read(action.path).use { local.writeAtomic(action.path, it) }
+                commit(action.path, writtenMeta(written, action.remote), action.remote)
             }
             is DeleteLocal -> {
                 if (!unchangedSinceScan(local, action.path, localSnap[action.path])) return Outcome.Skipped
@@ -138,16 +142,16 @@ class SyncExecutor(
                 val copyPath = ConflictNamer.conflictPath(c.path, remoteMeta)
 
                 if (!unchangedSinceScan(remote, c.path, remoteMeta)) return Outcome.Skipped
-                remote.writeAtomic(copyPath, remote.read(c.path))
-                local.writeAtomic(copyPath, remote.read(copyPath))
+                val remoteCopy = remote.read(c.path).use { remote.writeAtomic(copyPath, it) }
+                val localCopy = remote.read(copyPath).use { local.writeAtomic(copyPath, it) }
                 // The copy above is the only place the remote version survives; if the
                 // canonical was written again during those transfers, overwriting it now
                 // would destroy content no conflict copy holds.
                 if (!unchangedSinceScan(remote, c.path, remoteMeta)) return Outcome.Skipped
-                remote.writeAtomic(c.path, local.read(c.path))
+                val written = local.read(c.path).use { remote.writeAtomic(c.path, it) }
 
-                commit(copyPath, writtenMeta(local, copyPath, remoteMeta), writtenMeta(remote, copyPath, remoteMeta))
-                commit(c.path, localMeta, writtenMeta(remote, c.path, localMeta))
+                commit(copyPath, writtenMeta(localCopy, remoteMeta), writtenMeta(remoteCopy, remoteMeta))
+                commit(c.path, localMeta, writtenMeta(written, localMeta))
                 Outcome.Applied(ConflictReport(c.path, c.kind, copyPath))
             }
 
@@ -156,16 +160,16 @@ class SyncExecutor(
                 // it would destroy content no snapshot ever saw.
                 if (!unchangedSinceScan(remote, c.path, null)) return Outcome.Skipped
                 val localMeta = requireNotNull(c.local)
-                remote.writeAtomic(c.path, local.read(c.path))
-                commit(c.path, localMeta, writtenMeta(remote, c.path, localMeta))
+                val written = local.read(c.path).use { remote.writeAtomic(c.path, it) }
+                commit(c.path, localMeta, writtenMeta(written, localMeta))
                 Outcome.Applied(ConflictReport(c.path, c.kind, conflictCopyPath = null))
             }
 
             ConflictKind.DELETE_MODIFY -> {
                 if (!unchangedSinceScan(local, c.path, null)) return Outcome.Skipped
                 val remoteMeta = requireNotNull(c.remote)
-                local.writeAtomic(c.path, remote.read(c.path))
-                commit(c.path, writtenMeta(local, c.path, remoteMeta), remoteMeta)
+                val written = remote.read(c.path).use { local.writeAtomic(c.path, it) }
+                commit(c.path, writtenMeta(written, remoteMeta), remoteMeta)
                 Outcome.Applied(ConflictReport(c.path, c.kind, conflictCopyPath = null))
             }
 
@@ -194,18 +198,22 @@ class SyncExecutor(
     }
 
     /**
-     * Meta to record for a side that [source]'s content was just written to: the
-     * destination's own size/mtime with the source's hash. Falls back to [source] —
-     * costing one re-hash next pass — if the probe doesn't clearly show our write.
+     * Meta to record for a side [source]'s content was just written to: the write's
+     * own observed size/mtime paired with the source's hash, trusted only when the
+     * backend reported that stat and its size matches [source]. The stat must come
+     * from the write itself, never from re-probing the path: another writer can
+     * replace the file with same-size content right after our write, and recording
+     * ITS stat under OUR hash would make the scan hint skip re-hashing forever —
+     * silently treating the other writer's content as ours. Falling back to [source]
+     * merely costs one re-hash next pass, after which [refreshHints] repairs the
+     * record.
      */
-    private suspend fun writtenMeta(side: Storage, path: String, source: FileMeta): FileMeta {
-        val now = side.probe(path)
-        return if (now != null && now.size == source.size) {
-            FileMeta(now.size, now.mtimeMillis, source.contentHash)
+    private fun writtenMeta(written: RawEntry?, source: FileMeta): FileMeta =
+        if (written != null && written.size == source.size) {
+            FileMeta(written.size, written.mtimeMillis, source.contentHash)
         } else {
             source
         }
-    }
 
     private suspend fun commit(path: String, local: FileMeta?, remote: FileMeta?) {
         val record = if (local != null && remote != null) AncestorRecord(local, remote) else null

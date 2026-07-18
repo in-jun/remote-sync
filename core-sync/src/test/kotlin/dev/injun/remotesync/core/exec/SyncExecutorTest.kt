@@ -361,6 +361,30 @@ class SyncExecutorTest {
     }
 
     @Test
+    fun `a concurrent same-size overwrite right after our write is not treated as our own content`() = runTest {
+        val (local, remote, anc) = fixture()
+        local.seed("a.txt", "AAAA")
+        val exec = SyncExecutor(local, remote, anc)
+
+        // As our push lands on the remote, a second writer replaces it with different
+        // content of the SAME size. A size-only re-probe of the path would read the
+        // interloper's stat, pair it with OUR hash, and freeze the scan hint so the
+        // engine calls the remote UNCHANGED forever — the interloper's bytes lost, and
+        // a later local edit pushed straight over them. Recording the write's own stat
+        // instead must let the next pass see the change.
+        remote.afterWriteForTest = { remote.seed("a.txt", "BBBB") }
+        exec.sync()
+        remote.afterWriteForTest = null
+        assertEquals("BBBB", remote.contentOf("a.txt"))
+
+        val next = exec.sync() as SyncResult.Success
+        assertTrue(next.actionsApplied > 0, "concurrent overwrite went undetected")
+        assertEquals("BBBB", local.contentOf("a.txt"))
+        assertEquals("BBBB", remote.contentOf("a.txt"))
+        assertEquals(0, (exec.sync() as SyncResult.Success).actionsApplied)
+    }
+
+    @Test
     fun `identical edits on both sides converge without a conflict`() = runTest {
         val (local, remote, anc) = fixture()
         local.seed("a.txt", "v0")

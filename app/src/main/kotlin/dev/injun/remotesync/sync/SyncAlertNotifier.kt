@@ -13,7 +13,9 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dev.injun.remotesync.MainActivity
+import dev.injun.remotesync.core.exec.ConflictReport
 import dev.injun.remotesync.core.exec.SyncResult
+import dev.injun.remotesync.core.model.ConflictKind
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -54,17 +56,36 @@ class SyncAlertNotifier @Inject constructor(
     }
 
     /**
-     * Alerts that a pass materialized new conflict copies. Uses its own alert slot:
-     * the next clean pass calls [recordSuccess], which must not clear a conflict
-     * the user has yet to resolve.
+     * Alerts that a pass produced conflicts the user still has to act on. Uses its own
+     * alert slot: the next clean pass calls [recordSuccess], which must not clear a
+     * conflict the user has yet to resolve.
+     *
+     * The text is per-kind: kept-both copies point at the in-app resolver, while path
+     * and file-vs-directory collisions produce no copy and cannot be resolved in the
+     * app — those name the offending paths and tell the user to rename or remove one
+     * side. Auto-resolved modify-vs-delete conflicts keep the surviving edit and need
+     * nothing from the user, so a pass with only those raises no alert at all.
      */
-    fun notifyConflicts(pair: SyncPair, count: Int) {
-        postAlert(
-            conflictAlertId(pair.id),
-            "Sync conflicts: ${pair.name}",
-            "$count file(s) changed on both sides; both versions were kept. " +
-                "Open the app to resolve.",
-        )
+    fun notifyConflicts(pair: SyncPair, conflicts: List<ConflictReport>) {
+        val copies = conflicts.count { it.conflictCopyPath != null }
+        val collisions = conflicts.filter {
+            it.kind == ConflictKind.PATH_COLLISION || it.kind == ConflictKind.FILE_DIR_COLLISION
+        }
+        if (copies == 0 && collisions.isEmpty()) return
+
+        val lines = ArrayList<String>()
+        if (copies > 0) {
+            lines += "$copies file(s) changed on both sides; both versions were kept. " +
+                "Open the app to resolve."
+        }
+        if (collisions.isNotEmpty()) {
+            val shown = collisions.take(COLLISION_PATHS_SHOWN).joinToString(", ") { it.path }
+            val more = collisions.size - COLLISION_PATHS_SHOWN
+            val tail = if (more > 0) " (and $more more)" else ""
+            lines += "${collisions.size} path(s) can't be synced until you rename or remove " +
+                "one side: $shown$tail"
+        }
+        postAlert(conflictAlertId(pair.id), "Sync conflicts: ${pair.name}", lines.joinToString("\n\n"))
     }
 
     fun recordFailure(pair: SyncPair) {
@@ -180,5 +201,6 @@ class SyncAlertNotifier @Inject constructor(
         const val CONFLICT_ALERT_ID_BASE = 1_000_000_000L
         const val SERVICE_ALERT_ID = 1999
         const val FAILURE_ALERT_THRESHOLD = 3
+        const val COLLISION_PATHS_SHOWN = 3
     }
 }

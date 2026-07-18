@@ -161,7 +161,7 @@ class SmbRemoteStorage(
         }
     }
 
-    override suspend fun writeAtomic(path: String, content: Source): Unit = withContext(Dispatchers.IO) {
+    override suspend fun writeAtomic(path: String, content: Source): RawEntry? = withContext(Dispatchers.IO) {
         // The outer try owns [content]: connect/validate/mkdir can all fail, and
         // without it each failed action would leak the caller's open source.
         try {
@@ -183,7 +183,17 @@ class SmbRemoteStorage(
                 ).use { tmp ->
                     val bytes = content.buffer().use { it.readByteArray() }
                     tmp.write(bytes, 0)
+                    // Stat via the still-open handle, which follows the file object across
+                    // the rename below — never re-open [finalPath] by name afterwards: a
+                    // second writer could replace it in the gap, and pairing ITS stat with
+                    // our content hash would freeze the scan hint on the wrong bytes.
+                    val info = tmp.fileInformation
                     renameReplacing(disk, tmp, finalPath)
+                    RawEntry(
+                        path,
+                        info.standardInformation.endOfFile,
+                        info.basicInformation.lastWriteTime.toEpochMillis(),
+                    )
                 }
             } finally {
                 runCatching { if (disk.fileExists(tmpPath)) disk.rm(tmpPath) }
