@@ -16,6 +16,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
 import okio.Source
 import okio.buffer
@@ -117,12 +118,13 @@ class DirectFileLocalStorage(private val root: File) : Storage {
         if (!f.isFile) null else RawEntry(path, f.length(), f.lastModified())
     }
 
-    // Local push via inotify (FileObserver).
+    // Local push via inotify (FileObserver). flowOn keeps the recursive tree walk
+    // in start() off the collector's dispatcher (the UI watches from Main).
     override fun changes(): Flow<Unit> = callbackFlow {
         val watcher = DirectoryWatcher(root) { trySend(Unit) }
         watcher.start()
         awaitClose { watcher.stop() }
-    }
+    }.flowOn(Dispatchers.IO)
 
     // Resolve a relative path to a File, guarding against path traversal.
     private fun resolve(path: String): File {
