@@ -12,10 +12,6 @@ data class Snapshot(val files: Map<String, FileMeta>) {
 
     fun contains(path: String): Boolean = files.containsKey(path)
 
-    fun with(path: String, meta: FileMeta): Snapshot = Snapshot(files + (path to meta))
-
-    fun without(path: String): Snapshot = if (path in files) Snapshot(files - path) else this
-
     companion object {
         val EMPTY = Snapshot(emptyMap())
         fun of(vararg entries: Pair<String, FileMeta>): Snapshot = Snapshot(entries.toMap())
