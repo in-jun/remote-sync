@@ -171,7 +171,7 @@ private fun rememberSmbFormState(existing: SmbConfig?): SmbFormState =
 
 private class SmbFormState(existing: SmbConfig?) : RemoteFormState {
     var host by mutableStateOf(existing?.host ?: "")
-    var port by mutableStateOf((existing?.port ?: 445).toString())
+    var port by mutableStateOf((existing?.port ?: SmbConfig.DEFAULT_PORT).toString())
     var share by mutableStateOf(existing?.shareName ?: "")
     var domain by mutableStateOf(existing?.domain ?: "")
     var user by mutableStateOf(existing?.username ?: "")
@@ -185,7 +185,7 @@ private class SmbFormState(existing: SmbConfig?) : RemoteFormState {
 
     override fun build(): RemoteConfig = SmbConfig(
         host = host.trim(),
-        port = port.toIntOrNull() ?: 445,
+        port = port.toIntOrNull() ?: SmbConfig.DEFAULT_PORT,
         shareName = share.trim(),
         domain = domain.trim(),
         username = user.trim(),
