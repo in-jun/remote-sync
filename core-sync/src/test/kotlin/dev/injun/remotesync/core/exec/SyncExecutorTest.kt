@@ -7,6 +7,7 @@ import dev.injun.remotesync.core.safety.MaxDeleteGuard
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertInstanceOf
+import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -185,6 +186,148 @@ class SyncExecutorTest {
         assertEquals("edited", local.contentOf("note.txt"))
         val copy = requireNotNull(report.conflictCopyPath)
         assertEquals("reappeared", local.contentOf(copy))
+    }
+
+    @Test
+    fun `modify-modify resolution is skipped when the remote file changed after the scan`() = runTest {
+        val (local, remote, anc) = fixture()
+        local.seed("db.kdbx", "v0")
+        val exec = SyncExecutor(local, remote, anc)
+        exec.sync()
+
+        local.seed("db.kdbx", "local-edit")
+        remote.seed("db.kdbx", "remote-edit")
+        // The remote canonical is written again between the scan and the apply loop;
+        // materializing the stale plan would clobber that newest version.
+        remote.afterScanForTest = { remote.seed("db.kdbx", "newer-remote") }
+        val ancestorsBefore = anc.load()
+
+        val result = exec.sync() as SyncResult.Success
+
+        assertEquals(listOf("db.kdbx"), result.skippedPaths)
+        assertEquals(0, result.actionsApplied)
+        assertTrue(!result.hadConflicts)
+        // Nothing was touched: no conflict copy on either side, both edits intact.
+        assertEquals(setOf("db.kdbx"), local.paths())
+        assertEquals(setOf("db.kdbx"), remote.paths())
+        assertEquals("local-edit", local.contentOf("db.kdbx"))
+        assertEquals("newer-remote", remote.contentOf("db.kdbx"))
+        assertEquals(ancestorsBefore["db.kdbx"], anc.load()["db.kdbx"])
+
+        // Next pass re-plans against fresh state and preserves both versions.
+        remote.afterScanForTest = null
+        val next = exec.sync() as SyncResult.Success
+        val copy = requireNotNull(next.conflicts.single().conflictCopyPath)
+        assertEquals("local-edit", local.contentOf("db.kdbx"))
+        assertEquals("local-edit", remote.contentOf("db.kdbx"))
+        assertEquals("newer-remote", local.contentOf(copy))
+        assertEquals("newer-remote", remote.contentOf(copy))
+    }
+
+    @Test
+    fun `modify-modify resolution is skipped when the remote file changed mid-materialization`() = runTest {
+        val (local, remote, anc) = fixture()
+        local.seed("db.kdbx", "v0")
+        val exec = SyncExecutor(local, remote, anc)
+        exec.sync()
+
+        local.seed("db.kdbx", "local-edit")
+        remote.seed("db.kdbx", "remote-edit")
+        // The conflict copy is written to local AFTER the remote copy was taken but
+        // BEFORE the canonical is overwritten — the remote write landing here would be
+        // destroyed by the overwrite, because no conflict copy holds it.
+        local.beforeWriteForTest = { remote.seed("db.kdbx", "newer-remote") }
+        val ancestorsBefore = anc.load()
+
+        val result = exec.sync() as SyncResult.Success
+
+        assertEquals(listOf("db.kdbx"), result.skippedPaths)
+        assertEquals(0, result.actionsApplied)
+        assertEquals("local-edit", local.contentOf("db.kdbx"))
+        assertEquals("newer-remote", remote.contentOf("db.kdbx"))
+        assertEquals(ancestorsBefore["db.kdbx"], anc.load()["db.kdbx"])
+
+        // Next pass converges without losing any of the three versions.
+        local.beforeWriteForTest = null
+        val next = exec.sync() as SyncResult.Success
+        val copy = requireNotNull(next.conflicts.single().conflictCopyPath)
+        assertEquals("local-edit", remote.contentOf("db.kdbx"))
+        assertEquals("newer-remote", local.contentOf(copy))
+        assertEquals("newer-remote", remote.contentOf(copy))
+    }
+
+    @Test
+    fun `one failing file does not starve the rest and is retried next pass`() = runTest {
+        val (local, remote, anc) = fixture()
+        local.seed("a.txt", "alpha")
+        local.seed("b.txt", "bravo")
+        local.seed("c.txt", "charlie")
+        val exec = SyncExecutor(local, remote, anc)
+        local.failingReadsForTest.add("b.txt")
+
+        val result = exec.sync() as SyncResult.Success
+
+        // The failing push is reported, the other two still applied.
+        assertEquals(listOf("b.txt"), result.failures.map { it.path })
+        assertEquals(2, result.actionsApplied)
+        assertEquals("alpha", remote.contentOf("a.txt"))
+        assertEquals("charlie", remote.contentOf("c.txt"))
+        assertNull(remote.contentOf("b.txt"))
+        // No ancestor was committed for the failed path, so it is not forgotten.
+        assertNull(anc.load()["b.txt"])
+
+        local.failingReadsForTest.clear()
+        val retry = exec.sync() as SyncResult.Success
+        assertTrue(retry.failures.isEmpty())
+        assertEquals("bravo", remote.contentOf("b.txt"))
+        assertEquals(0, (exec.sync() as SyncResult.Success).actionsApplied)
+    }
+
+    @Test
+    fun `mtime-only touch refreshes the stored ancestor stat without any action`() = runTest {
+        val (local, remote, anc) = fixture()
+        local.seed("a.txt", "v0")
+        val exec = SyncExecutor(local, remote, anc)
+        exec.sync()
+        val before = requireNotNull(anc.load()["a.txt"])
+
+        local.touchForTest("a.txt")
+        val result = exec.sync() as SyncResult.Success
+
+        assertEquals(0, result.actionsApplied)
+        assertTrue(result.failures.isEmpty() && result.skippedPaths.isEmpty())
+        val after = requireNotNull(anc.load()["a.txt"])
+        assertNotEquals(before.local.mtimeMillis, after.local.mtimeMillis)
+        assertEquals(requireNotNull(local.stat("a.txt")).mtimeMillis, after.local.mtimeMillis)
+        assertEquals(before.local.contentHash, after.local.contentHash)
+        assertEquals(before.remote, after.remote)
+    }
+
+    @Test
+    fun `hint refresh never rewrites the record for a path whose content diverged`() = runTest {
+        val (local, remote, anc) = fixture()
+        local.seed("a.txt", "v0")
+        val exec = SyncExecutor(local, remote, anc)
+        exec.sync()
+        val before = anc.load()["a.txt"]
+
+        // Diverge the content but make the push fail, so the pass ends with the
+        // old record still loaded and the divergence unresolved.
+        local.seed("a.txt", "local-edit")
+        local.failingReadsForTest.add("a.txt")
+
+        val result = exec.sync() as SyncResult.Success
+
+        assertEquals(listOf("a.txt"), result.failures.map { it.path })
+        assertEquals(before, anc.load()["a.txt"])
+
+        // With the record intact the edit is re-planned and completed next pass;
+        // a rewritten record would make this pass pull v0 over the edit instead.
+        local.failingReadsForTest.clear()
+        val next = exec.sync() as SyncResult.Success
+        assertTrue(next.failures.isEmpty())
+        assertEquals("local-edit", local.contentOf("a.txt"))
+        assertEquals("local-edit", remote.contentOf("a.txt"))
     }
 
     @Test
