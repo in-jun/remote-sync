@@ -1,15 +1,18 @@
 package dev.injun.remotesync.conflict
 
 import dev.injun.remotesync.core.exec.ConflictNamer
-import dev.injun.remotesync.core.port.TempFiles
-import java.io.File
+import dev.injun.remotesync.core.model.Snapshot
+import dev.injun.remotesync.core.port.Storage
+import dev.injun.remotesync.data.db.AncestorDao
+import dev.injun.remotesync.data.db.RoomAncestorStore
+import dev.injun.remotesync.sync.StorageFactory
+import dev.injun.remotesync.sync.SyncPair
 import java.io.IOException
-import java.nio.file.Files
-import java.nio.file.StandardCopyOption
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okio.buffer
 
 /** A conflict still awaiting resolution: the canonical file plus its preserved sibling. */
 data class ConflictItem(
@@ -47,47 +50,49 @@ class StaleConflictException :
 /**
  * Finds and resolves conflict copies (`*.conflict-<hash>`) in the local folder.
  * Resolution edits local files; the next sync propagates the result to the remote.
+ * All file access goes through the pair's [Storage], so it inherits the backend's
+ * atomicity and durability guarantees and keeps working if the local backend changes.
  */
 @Singleton
-class ConflictManager @Inject constructor() {
+class ConflictManager @Inject constructor(
+    private val storages: StorageFactory,
+    private val ancestorDao: AncestorDao,
+) {
 
-    suspend fun scan(pairId: Long, pairName: String, localRoot: String): List<ConflictItem> =
-        withContext(Dispatchers.IO) {
-        val root = File(localRoot)
-        if (!root.isDirectory) return@withContext emptyList()
-        root.walkTopDown()
-            .filter { it.isFile }
-            .mapNotNull { file ->
-                val rel = file.relativeTo(root).path.replace(File.separatorChar, '/')
-                val original = ConflictNamer.originalPathOf(rel) ?: return@mapNotNull null
-                val canonical = File(root, original)
-                ConflictItem(
-                    pairId = pairId,
-                    pairName = pairName,
-                    originalPath = original,
-                    conflictCopyPath = rel,
-                    localSize = if (canonical.isFile) canonical.length() else 0,
-                    localMtime = if (canonical.isFile) canonical.lastModified() else 0,
-                    remoteSize = file.length(),
-                    remoteMtime = file.lastModified(),
-                    canonicalExists = canonical.isFile,
-                    localPreview = if (canonical.isFile) previewOf(canonical) else null,
-                    remotePreview = previewOf(file),
-                    keepBothName = keepBothTarget(root, original).name,
-                )
-            }
-            .toList()
+    suspend fun scan(pair: SyncPair): List<ConflictItem> = withContext(Dispatchers.IO) {
+        val storage = storages.local(pair)
+        // Same hint the executor uses: the ancestor's recorded local stats, so only
+        // files changed since the last pass are re-hashed by the scan.
+        val records = RoomAncestorStore(ancestorDao, pair.id).load()
+        val snapshot = storage.scan(Snapshot(records.mapValues { it.value.local }))
+        snapshot.paths.mapNotNull { path ->
+            val original = ConflictNamer.originalPathOf(path) ?: return@mapNotNull null
+            val copy = snapshot[path] ?: return@mapNotNull null
+            val canonical = snapshot[original]
+            ConflictItem(
+                pairId = pair.id,
+                pairName = pair.name,
+                originalPath = original,
+                conflictCopyPath = path,
+                localSize = canonical?.size ?: 0,
+                localMtime = canonical?.mtimeMillis ?: 0,
+                remoteSize = copy.size,
+                remoteMtime = copy.mtimeMillis,
+                canonicalExists = canonical != null,
+                localPreview = if (canonical != null) previewOf(storage, original) else null,
+                remotePreview = previewOf(storage, path),
+                keepBothName = keepBothTarget(storage, original).substringAfterLast('/'),
+            )
+        }
     }
 
     suspend fun resolve(
-        localRoot: String,
+        pair: SyncPair,
         item: ConflictItem,
         resolution: ConflictResolution,
     ): Unit = withContext(Dispatchers.IO) {
-        val root = File(localRoot)
-        val canonical = File(root, item.originalPath)
-        val copy = File(root, item.conflictCopyPath)
-        if (!copy.isFile) return@withContext // already resolved
+        val storage = storages.local(pair)
+        val copy = storage.probe(item.conflictCopyPath) ?: return@withContext // already resolved
 
         // The user decided from the state captured at scan time, but a background sync
         // can rewrite the canonical file or the conflict copy in between (both are
@@ -96,46 +101,35 @@ class ConflictManager @Inject constructor() {
         // resolutions and make the user review the fresh state instead. KEEP_BOTH
         // preserves everything and needs no check.
         if (resolution != ConflictResolution.KEEP_BOTH) {
-            val exists = canonical.isFile
-            val changed = exists != item.canonicalExists ||
-                (exists && (canonical.length() != item.localSize || canonical.lastModified() != item.localMtime)) ||
-                copy.length() != item.remoteSize || copy.lastModified() != item.remoteMtime
+            val canonical = storage.probe(item.originalPath)
+            val changed = (canonical != null) != item.canonicalExists ||
+                (canonical != null && (canonical.size != item.localSize || canonical.mtimeMillis != item.localMtime)) ||
+                copy.size != item.remoteSize || copy.mtimeMillis != item.remoteMtime
             if (changed) throw StaleConflictException()
         }
 
+        // Every operation below throws on failure, so a resolution that could not be
+        // applied surfaces to the caller instead of reading as success.
         when (resolution) {
-            ConflictResolution.KEEP_LOCAL -> {
-                copy.delete()
-            }
+            ConflictResolution.KEEP_LOCAL -> storage.delete(item.conflictCopyPath)
             ConflictResolution.KEEP_REMOTE -> {
-                canonical.parentFile?.mkdirs()
-                val tmp = File(canonical.parentFile, TempFiles.nameFor(canonical.name))
-                copy.copyTo(tmp, overwrite = true)
-                Files.move(
-                    tmp.toPath(),
-                    canonical.toPath(),
-                    StandardCopyOption.REPLACE_EXISTING,
-                    StandardCopyOption.ATOMIC_MOVE,
-                )
-                copy.delete()
+                storage.writeAtomic(item.originalPath, storage.read(item.conflictCopyPath))
+                storage.delete(item.conflictCopyPath)
             }
-            ConflictResolution.KEEP_BOTH -> {
-                copy.renameTo(keepBothTarget(root, item.originalPath))
-            }
+            ConflictResolution.KEEP_BOTH ->
+                storage.move(item.conflictCopyPath, keepBothTarget(storage, item.originalPath))
         }
     }
 
-    // A short text preview of [file], or null if it looks binary. Reads only the first chunk.
-    private fun previewOf(file: File): String? {
-        if (!file.isFile) return null
+    // A short text preview of [path], or null if it looks binary. Reads only the first chunk.
+    private suspend fun previewOf(storage: Storage, path: String): String? {
         val bytes = try {
-            file.inputStream().use { input ->
-                val buf = ByteArray(PREVIEW_BYTES)
-                val n = input.read(buf)
-                if (n <= 0) return "" else buf.copyOf(n)
+            storage.read(path).buffer().use { source ->
+                source.request(PREVIEW_BYTES.toLong())
+                source.buffer.readByteArray(minOf(source.buffer.size, PREVIEW_BYTES.toLong()))
             }
         } catch (e: IOException) {
-            // A concurrent sync can rewrite or delete the file between the walk and
+            // A concurrent sync can rewrite or delete the file between the scan and
             // the read; treat it like missing content rather than failing the scan.
             return null
         }
@@ -145,20 +139,20 @@ class ConflictManager @Inject constructor() {
         return String(bytes, Charsets.UTF_8).take(PREVIEW_CHARS)
     }
 
-    /** A readable, stable name for a kept-both copy, e.g. `db (conflict).kdbx`. */
-    private fun keepBothTarget(root: File, originalPath: String): File {
-        val dir = File(root, originalPath).parentFile ?: root
-        val name = File(originalPath).name
+    /** A readable, stable relative path for a kept-both copy, e.g. `db (conflict).kdbx`. */
+    private suspend fun keepBothTarget(storage: Storage, originalPath: String): String {
+        val dir = originalPath.substringBeforeLast('/', "")
+        val name = originalPath.substringAfterLast('/')
         val dot = name.lastIndexOf('.')
         val base = if (dot > 0) name.substring(0, dot) else name
         val ext = if (dot > 0) name.substring(dot) else ""
-        var candidate = File(dir, "$base (conflict)$ext")
-        var n = 2
-        while (candidate.exists()) {
-            candidate = File(dir, "$base (conflict $n)$ext")
+        var n = 1
+        while (true) {
+            val candidateName = if (n == 1) "$base (conflict)$ext" else "$base (conflict $n)$ext"
+            val candidate = if (dir.isEmpty()) candidateName else "$dir/$candidateName"
+            if (storage.probe(candidate) == null) return candidate
             n++
         }
-        return candidate
     }
 
     private companion object {

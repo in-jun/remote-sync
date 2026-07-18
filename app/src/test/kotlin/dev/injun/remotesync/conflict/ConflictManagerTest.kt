@@ -1,5 +1,14 @@
 package dev.injun.remotesync.conflict
 
+import dev.injun.remotesync.core.port.Storage
+import dev.injun.remotesync.data.db.AncestorDao
+import dev.injun.remotesync.data.db.AncestorEntity
+import dev.injun.remotesync.data.local.DirectFileLocalStorage
+import dev.injun.remotesync.sync.RemoteConfig
+import dev.injun.remotesync.sync.RemoteStorage
+import dev.injun.remotesync.sync.SmbConfig
+import dev.injun.remotesync.sync.StorageFactory
+import dev.injun.remotesync.sync.SyncPair
 import java.io.File
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -9,13 +18,26 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 
 /**
- * Exercises [ConflictManager] on a real temp filesystem. Resolution is the only code
- * that deletes or overwrites user files on purpose, so every case asserts the exact
- * byte content that survives, not just which paths exist.
+ * Exercises [ConflictManager] on a real temp filesystem behind [DirectFileLocalStorage].
+ * Resolution is the only code that deletes or overwrites user files on purpose, so
+ * every case asserts the exact byte content that survives, not just which paths exist.
  */
 class ConflictManagerTest {
 
-    private val manager = ConflictManager()
+    private val manager = ConflictManager(
+        storages = object : StorageFactory {
+            override fun local(pair: SyncPair): Storage = DirectFileLocalStorage(File(pair.localRoot))
+            override fun remote(config: RemoteConfig): RemoteStorage = throw UnsupportedOperationException()
+        },
+        ancestorDao = EmptyAncestorDao,
+    )
+
+    private fun pairFor(root: File) = SyncPair(
+        id = 1L,
+        name = "pair",
+        localRoot = root.path,
+        remote = SmbConfig(host = "host", shareName = "share", username = "u", password = "p"),
+    )
 
     private fun write(root: File, path: String, content: String): File =
         File(root, path).apply {
@@ -27,11 +49,18 @@ class ConflictManagerTest {
         File(root, path).let { if (it.isFile) it.readText() else null }
 
     private suspend fun scanOne(root: File): ConflictItem =
-        manager.scan(1L, "pair", root.path).single()
+        manager.scan(pairFor(root)).single()
 
     private suspend fun assertStale(root: File, item: ConflictItem, resolution: ConflictResolution) {
-        val e = runCatching { manager.resolve(root.path, item, resolution) }.exceptionOrNull()
+        val e = runCatching { manager.resolve(pairFor(root), item, resolution) }.exceptionOrNull()
         assertTrue(e is StaleConflictException, "expected StaleConflictException, got: $e")
+    }
+
+    private object EmptyAncestorDao : AncestorDao {
+        override suspend fun all(pairId: Long): List<AncestorEntity> = emptyList()
+        override suspend fun upsert(entity: AncestorEntity) = Unit
+        override suspend fun delete(pairId: Long, path: String) = Unit
+        override suspend fun clear(pairId: Long) = Unit
     }
 
     // ---- scan ----
@@ -60,7 +89,7 @@ class ConflictManagerTest {
         write(root, "c.txt.conflict-9F86D081", "x") // uppercase hex
         write(root, "d.txt.conflict-notahex1", "x") // non-hex chars
 
-        assertTrue(manager.scan(1L, "pair", root.path).isEmpty())
+        assertTrue(manager.scan(pairFor(root)).isEmpty())
     }
 
     @Test
@@ -81,7 +110,7 @@ class ConflictManagerTest {
         write(root, "db.kdbx.conflict-9f86d081", "remote")
         val item = scanOne(root)
 
-        manager.resolve(root.path, item, ConflictResolution.KEEP_LOCAL)
+        manager.resolve(pairFor(root), item, ConflictResolution.KEEP_LOCAL)
 
         assertEquals("local", read(root, "db.kdbx"))
         assertEquals(null, read(root, "db.kdbx.conflict-9f86d081"))
@@ -93,7 +122,7 @@ class ConflictManagerTest {
         write(root, "db.kdbx.conflict-9f86d081", "remote")
         val item = scanOne(root)
 
-        manager.resolve(root.path, item, ConflictResolution.KEEP_REMOTE)
+        manager.resolve(pairFor(root), item, ConflictResolution.KEEP_REMOTE)
 
         assertEquals("remote", read(root, "db.kdbx"))
         assertEquals(null, read(root, "db.kdbx.conflict-9f86d081"))
@@ -107,7 +136,7 @@ class ConflictManagerTest {
         write(root, "vault/db.kdbx.conflict-9f86d081", "remote")
         val item = scanOne(root)
 
-        manager.resolve(root.path, item, ConflictResolution.KEEP_BOTH)
+        manager.resolve(pairFor(root), item, ConflictResolution.KEEP_BOTH)
 
         assertEquals("local", read(root, "vault/db.kdbx"))
         assertEquals("remote", read(root, "vault/db (conflict).kdbx"))
@@ -121,7 +150,7 @@ class ConflictManagerTest {
         write(root, "db.kdbx.conflict-9f86d081", "remote")
         val item = scanOne(root) // the earlier copy is a plain file, not a conflict
 
-        manager.resolve(root.path, item, ConflictResolution.KEEP_BOTH)
+        manager.resolve(pairFor(root), item, ConflictResolution.KEEP_BOTH)
 
         assertEquals("earlier", read(root, "db (conflict).kdbx"))
         assertEquals("remote", read(root, "db (conflict 2).kdbx"))
@@ -134,7 +163,7 @@ class ConflictManagerTest {
         val item = scanOne(root)
         assertTrue(File(root, "db.kdbx.conflict-9f86d081").delete())
 
-        manager.resolve(root.path, item, ConflictResolution.KEEP_REMOTE)
+        manager.resolve(pairFor(root), item, ConflictResolution.KEEP_REMOTE)
         assertEquals("local", read(root, "db.kdbx"))
     }
 
@@ -215,7 +244,7 @@ class ConflictManagerTest {
 
         write(root, "db.kdbx", "newer remote content")
 
-        manager.resolve(root.path, item, ConflictResolution.KEEP_BOTH)
+        manager.resolve(pairFor(root), item, ConflictResolution.KEEP_BOTH)
         assertEquals("newer remote content", read(root, "db.kdbx"))
         assertEquals("remote", read(root, "db (conflict).kdbx"))
     }
