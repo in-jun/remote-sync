@@ -165,9 +165,10 @@ class SyncExecutor(
             }
 
             // No I/O and no ancestor commit: any write/delete could silently clobber the
-            // colliding sibling on a case-insensitive/normalizing replica. Left pending
-            // (re-reported every pass) until the user renames one of the files.
-            ConflictKind.PATH_COLLISION ->
+            // colliding sibling on a case-insensitive/normalizing replica, and a file
+            // can never atomically replace a directory (or vice versa). Left pending
+            // (re-reported every pass) until the user renames or removes one side.
+            ConflictKind.PATH_COLLISION, ConflictKind.FILE_DIR_COLLISION ->
                 Outcome.Applied(ConflictReport(c.path, c.kind, conflictCopyPath = null))
         }
     }

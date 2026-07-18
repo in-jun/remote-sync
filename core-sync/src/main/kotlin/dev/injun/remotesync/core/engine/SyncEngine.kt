@@ -35,14 +35,19 @@ class SyncEngine {
             addAll(remote.paths)
         }
         val colliding = collidingPaths(allPaths)
+        val nested = nestedPaths(allPaths)
         for (path in allPaths) {
             val action = decide(path, ancestor[path], local[path], remote[path]) ?: continue
             // Propagating into a collision group could silently overwrite a sibling on a
-            // case-insensitive/normalizing replica, so only no-I/O actions pass through.
-            actions += if (path in colliding && action !is Converged) {
+            // case-insensitive/normalizing replica, and propagating across a file-vs-
+            // directory mismatch can never succeed, so only no-I/O actions pass through.
+            actions += if (action !is Converged && (path in colliding || path in nested)) {
+                val kind =
+                    if (path in colliding) ConflictKind.PATH_COLLISION
+                    else ConflictKind.FILE_DIR_COLLISION
                 Conflict(
                     path,
-                    ConflictKind.PATH_COLLISION,
+                    kind,
                     local = local[path],
                     remote = remote[path],
                     ancestorBefore = ancestor[path],
@@ -62,11 +67,36 @@ class SyncEngine {
      * would otherwise propagate back.
      */
     private fun collidingPaths(paths: Set<String>): Set<String> {
-        val byFoldedPath = paths.groupBy {
-            Normalizer.normalize(it, Normalizer.Form.NFC).lowercase(Locale.ROOT)
-        }
+        val byFoldedPath = paths.groupBy(::fold)
         return byFoldedPath.values.filter { it.size > 1 }.flatten().toSet()
     }
+
+    /**
+     * Paths where one entry is a directory-prefix of another: the shorter path is a
+     * FILE on some replica but a DIRECTORY (holding the longer path) on another, a
+     * type mismatch [FileMeta] cannot represent. Propagating either side is doomed —
+     * renaming a file onto a directory or creating a parent directory over a file
+     * fails on every pass — so both paths surface as typed conflicts instead. Folded
+     * like [collidingPaths] so the check also holds on case-insensitive replicas.
+     */
+    private fun nestedPaths(paths: Set<String>): Set<String> {
+        val byFoldedPath = paths.groupBy(::fold)
+        val nested = HashSet<String>()
+        for ((folded, group) in byFoldedPath) {
+            var slash = folded.lastIndexOf('/')
+            while (slash > 0) {
+                byFoldedPath[folded.substring(0, slash)]?.let { prefixGroup ->
+                    nested.addAll(group)
+                    nested.addAll(prefixGroup)
+                }
+                slash = folded.lastIndexOf('/', slash - 1)
+            }
+        }
+        return nested
+    }
+
+    private fun fold(path: String): String =
+        Normalizer.normalize(path, Normalizer.Form.NFC).lowercase(Locale.ROOT)
 
     private fun decide(path: String, a: FileMeta?, l: FileMeta?, r: FileMeta?): SyncAction? {
         val localChange = classify(a, l)
