@@ -19,8 +19,9 @@ import javax.inject.Singleton
 
 /**
  * Surfaces sync outcomes that need user attention as notifications: a safety-guard
- * abort (never auto-retried, so sync stalls until the user acts) and repeated
- * failures. Consecutive-failure counts are persisted so infrequent periodic runs
+ * abort (never auto-retried, so sync stalls until the user acts), repeated failures,
+ * and new conflicts (both versions are kept, but they stay diverged until resolved
+ * in the app). Consecutive-failure counts are persisted so infrequent periodic runs
  * still accumulate across process death; a success clears the count and any alert.
  */
 @Singleton
@@ -52,6 +53,20 @@ class SyncAlertNotifier @Inject constructor(
         NotificationManagerCompat.from(context).cancel(SERVICE_ALERT_ID)
     }
 
+    /**
+     * Alerts that a pass materialized new conflict copies. Uses its own alert slot:
+     * the next clean pass calls [recordSuccess], which must not clear a conflict
+     * the user has yet to resolve.
+     */
+    fun notifyConflicts(pair: SyncPair, count: Int) {
+        postAlert(
+            conflictAlertId(pair.id),
+            "Sync conflicts: ${pair.name}",
+            "$count file(s) changed on both sides; both versions were kept. " +
+                "Open the app to resolve.",
+        )
+    }
+
     fun recordFailure(pair: SyncPair) {
         val failures = prefs.getInt(failureKey(pair.id), 0) + 1
         prefs.edit().putInt(failureKey(pair.id), failures).apply()
@@ -72,10 +87,11 @@ class SyncAlertNotifier @Inject constructor(
         NotificationManagerCompat.from(context).cancel(alertId(pair.id))
     }
 
-    /** Drops persisted failure state and any visible alert for a deleted pair. */
+    /** Drops persisted failure state and any visible alerts for a deleted pair. */
     fun forget(pairId: Long) {
         prefs.edit().remove(failureKey(pairId)).apply()
         NotificationManagerCompat.from(context).cancel(alertId(pairId))
+        NotificationManagerCompat.from(context).cancel(conflictAlertId(pairId))
     }
 
     private fun postAlert(id: Int, title: String, text: String) {
@@ -128,9 +144,13 @@ class SyncAlertNotifier @Inject constructor(
     // One alert slot per pair; abort and failure alerts replace each other.
     private fun alertId(pairId: Long): Int = (ALERT_ID_BASE + pairId).toInt()
 
+    // A separate slot per pair for conflicts, so success/failure alerts never mask them.
+    private fun conflictAlertId(pairId: Long): Int = (CONFLICT_ALERT_ID_BASE + pairId).toInt()
+
     private companion object {
         const val CHANNEL_ID = "sync_alerts"
         const val ALERT_ID_BASE = 2000L
+        const val CONFLICT_ALERT_ID_BASE = 1_000_000_000L
         const val SERVICE_ALERT_ID = 1999
         const val FAILURE_ALERT_THRESHOLD = 3
     }
