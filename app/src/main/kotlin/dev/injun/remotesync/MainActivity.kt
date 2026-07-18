@@ -173,7 +173,7 @@ private fun AppRoot(viewModel: MainViewModel) {
             onRequestPermission = requestStorageAccess,
             onRequestNotifications = requestNotificationAccess,
             onSyncPair = viewModel::syncPair,
-            onSyncAll = viewModel::syncAll,
+            onSyncAll = { viewModel.syncAll(manual = true) },
             onAddPair = { screen = Screen.PROTOCOL },
             onEditPair = { id -> editingId = id; screen = Screen.SETUP },
             onSettings = { screen = Screen.SETTINGS },

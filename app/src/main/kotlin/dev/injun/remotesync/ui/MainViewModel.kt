@@ -152,8 +152,7 @@ class MainViewModel @Inject constructor(
     fun syncPair(id: Long) {
         if (!networkGate.allowsSync(config.settings.value)) {
             // Automatic triggers skip silently, but an explicit tap needs feedback.
-            _error.value = "Sync skipped: \"Sync on Wi-Fi only\" is on and this " +
-                "network is metered"
+            _error.value = SYNC_BLOCKED_MESSAGE
             return
         }
         val target = config.pair(id) ?: return
@@ -169,10 +168,19 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    fun syncAll() {
+    /**
+     * Syncs every pair. [manual] marks an explicit user action (the toolbar button):
+     * a blocked manual sync surfaces the reason, while automatic triggers
+     * (foregrounding, change watch) stay silent — the network gate blocking them is
+     * routine, not news.
+     */
+    fun syncAll(manual: Boolean = false) {
         viewModelScope.launch {
             config.awaitLoaded()
-            if (!networkGate.allowsSync(config.settings.value)) return@launch
+            if (!networkGate.allowsSync(config.settings.value)) {
+                if (manual) _error.value = SYNC_BLOCKED_MESSAGE
+                return@launch
+            }
             for (pair in config.pairs.value) {
                 if (pair.id in _syncing.value) continue
                 _syncing.value = _syncing.value + pair.id
@@ -236,4 +244,10 @@ class MainViewModel @Inject constructor(
 
     private fun errorText(what: String, e: Throwable): String =
         "$what: ${e.message ?: e.javaClass.simpleName}"
+
+    private companion object {
+        // Matches the Settings label so the user knows which switch to flip.
+        const val SYNC_BLOCKED_MESSAGE =
+            "Sync skipped: \"Sync on Wi-Fi only\" is on and this network is metered"
+    }
 }

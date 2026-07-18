@@ -35,6 +35,7 @@ class SyncWorker @AssistedInject constructor(
                     is SyncResult.Success ->
                         if (result.failures.isNotEmpty()) transientFailure = true
                     is SyncResult.Aborted -> Unit // SyncManager notified the user; don't retry
+                    null -> Unit // pair was deleted after this batch's snapshot; nothing to do
                 }
             } catch (e: CancellationException) {
                 throw e // WorkManager is stopping the worker — don't keep syncing pairs
