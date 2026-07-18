@@ -65,7 +65,7 @@ class DirectFileLocalStorage(private val root: File) : Storage {
         resolve(path).source()
     }
 
-    override suspend fun writeAtomic(path: String, content: Source): Unit = withContext(Dispatchers.IO) {
+    override suspend fun writeAtomic(path: String, content: Source): RawEntry? = withContext(Dispatchers.IO) {
         // The outer try owns [content]: resolve() can reject the path before the
         // inner finally exists, and the source must still be closed then.
         try {
@@ -79,12 +79,18 @@ class DirectFileLocalStorage(private val root: File) : Storage {
                     sink.flush()
                     fos.fd.sync() // force to disk before the rename makes it visible
                 }
+                // Stat the temp we just wrote, before the rename publishes the name — a
+                // rename preserves size and mtime, so this is the target's stat, and it
+                // is attributable to THIS write even if another writer replaces the name
+                // an instant later. Re-statting [path] afterwards could not promise that.
+                val written = RawEntry(path, tmp.length(), tmp.lastModified())
                 Files.move(
                     tmp.toPath(),
                     target.toPath(),
                     StandardCopyOption.REPLACE_EXISTING,
                     StandardCopyOption.ATOMIC_MOVE,
                 )
+                written
             } finally {
                 if (tmp.exists()) tmp.delete()
             }

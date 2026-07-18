@@ -1,7 +1,9 @@
 package dev.injun.remotesync.sync
 
+import dev.injun.remotesync.core.exec.ConflictReport
 import dev.injun.remotesync.core.exec.SyncExecutor
 import dev.injun.remotesync.core.exec.SyncResult
+import dev.injun.remotesync.core.model.ConflictKind
 import dev.injun.remotesync.core.safety.MaxDeleteGuard
 import dev.injun.remotesync.data.config.ConfigRepository
 import dev.injun.remotesync.data.config.SyncStateStore
@@ -57,7 +59,7 @@ class SyncManager @Inject constructor(
                         if (result.failures.isEmpty()) alerts.recordSuccess(current) else alerts.recordFailure(current)
                         // Both versions are preserved, but they stay diverged until the
                         // user acts; a background pass must not leave that invisible.
-                        if (result.hadConflicts) alerts.notifyConflicts(current, result.conflicts.size)
+                        if (result.hadConflicts) alerts.notifyConflicts(current, result.conflicts)
                     }
                     is SyncResult.Aborted -> alerts.notifyAborted(current, result)
                 }
@@ -95,9 +97,26 @@ class SyncManager @Inject constructor(
             result.failures.isNotEmpty() ->
                 "Synced ${result.actionsApplied}, ${result.failures.size} failed " +
                     "(first: ${result.failures.first().path})"
-            result.hadConflicts -> "${result.conflicts.size} conflict(s)"
+            result.hadConflicts -> conflictSummary(result.conflicts)
             else -> "Synced (${result.actionsApplied})"
         }
         is SyncResult.Aborted -> "Aborted (safety limit)"
+    }
+
+    /**
+     * Kind-aware last-sync line. Collisions can't be resolved in the app, so they are
+     * called out separately with the first offending path — a bare "N conflict(s)"
+     * would hide that some need a manual rename/remove outside the app.
+     */
+    private fun conflictSummary(conflicts: List<ConflictReport>): String {
+        val collisions = conflicts.filter {
+            it.kind == ConflictKind.PATH_COLLISION || it.kind == ConflictKind.FILE_DIR_COLLISION
+        }
+        val kept = conflicts.count { it.conflictCopyPath != null }
+        return when {
+            collisions.isEmpty() -> "${conflicts.size} conflict(s)"
+            kept == 0 -> "${collisions.size} collision(s): rename/remove ${collisions.first().path}"
+            else -> "$kept conflict(s), ${collisions.size} collision(s) (${collisions.first().path})"
+        }
     }
 }

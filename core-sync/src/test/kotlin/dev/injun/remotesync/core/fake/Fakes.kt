@@ -5,6 +5,7 @@ import dev.injun.remotesync.core.model.Snapshot
 import dev.injun.remotesync.core.port.AncestorRecord
 import dev.injun.remotesync.core.port.AncestorStore
 import dev.injun.remotesync.core.port.RawEntry
+import dev.injun.remotesync.core.port.SnapshotBuilder
 import dev.injun.remotesync.core.port.Storage
 import java.io.IOException
 import java.security.MessageDigest
@@ -75,6 +76,12 @@ class InMemoryStorage(private val fault: FaultController? = null) : Storage {
     var afterScanForTest: (() -> Unit)? = null
     /** Runs before each atomic write — mutations here land mid-action. */
     var beforeWriteForTest: ((String) -> Unit)? = null
+    /**
+     * Runs right after an atomic write completes but before the executor commits its
+     * ancestor — models a concurrent writer replacing the file in that window. The
+     * stat this write reports is captured beforehand, so it still describes our bytes.
+     */
+    var afterWriteForTest: ((String) -> Unit)? = null
     /** Paths whose read throws, simulating a per-file I/O failure. */
     val failingReadsForTest = mutableSetOf<String>()
     fun seed(path: String, content: String) { files[path] = Node(content.toByteArray(), clock++) }
@@ -87,7 +94,11 @@ class InMemoryStorage(private val fault: FaultController? = null) : Storage {
 
     // ---- Storage ----
     override suspend fun scan(hint: Snapshot): Snapshot {
-        val snap = Snapshot(files.mapValues { (_, n) -> FileMeta(n.bytes.size.toLong(), n.mtime, sha256(n.bytes)) })
+        // Mirror the real storages: reuse the hint's hash when a file's size+mtime are
+        // unchanged (via SnapshotBuilder) instead of always re-hashing. That is the very
+        // path a mis-attributed ancestor stat poisons, so tests can exercise it here.
+        val entries = files.map { (path, n) -> RawEntry(path, n.bytes.size.toLong(), n.mtime) }
+        val snap = SnapshotBuilder.build(entries, hint) { path -> sha256(files.getValue(path).bytes) }
         afterScanForTest?.invoke()
         return snap
     }
@@ -98,11 +109,16 @@ class InMemoryStorage(private val fault: FaultController? = null) : Storage {
         return Buffer().write(n.bytes)
     }
 
-    override suspend fun writeAtomic(path: String, content: Source) {
+    override suspend fun writeAtomic(path: String, content: Source): RawEntry? {
         beforeWriteForTest?.invoke(path)
         val bytes = content.buffer().use { it.readByteArray() }
         fault?.step() // crash before the atomic swap → old file remains
-        files[path] = Node(bytes, clock++)
+        val mtime = clock++
+        files[path] = Node(bytes, mtime)
+        // Reflects OUR write, captured before any concurrent replacement below.
+        val written = RawEntry(path, bytes.size.toLong(), mtime)
+        afterWriteForTest?.invoke(path)
+        return written
     }
 
     override suspend fun delete(path: String) {

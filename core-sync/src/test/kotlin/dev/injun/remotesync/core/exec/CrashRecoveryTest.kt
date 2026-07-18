@@ -137,6 +137,30 @@ class CrashRecoveryTest {
     }
 
     @Test
+    fun `modify-vs-delete survives a crash at any step and the edit wins`() = runTest {
+        // Pins the write-then-commit ordering for modify-vs-delete: if the commit ran
+        // before the write, a crash in between would leave an ancestor claiming both
+        // sides hold the edit while the target is still absent. The next pass would
+        // then read that side as DELETED and propagate the deletion, destroying the
+        // surviving edit. Covers both MODIFY_DELETE and its DELETE_MODIFY mirror.
+        val required = setOf("kept-edit-l", "kept-edit-r")
+        sweepCrashPoints(requiredContents = required) { fault ->
+            val local = InMemoryStorage(fault)
+            val remote = InMemoryStorage(fault)
+            val anc = InMemoryAncestorStore(fault)
+            local.seed("notes-l.txt", "v0")
+            local.seed("notes-r.txt", "v0")
+            SyncExecutor(local, remote, anc).sync()
+            // Local edits a file the remote deletes; remote edits one the local deletes.
+            local.seed("notes-l.txt", "kept-edit-l")
+            remote.deleteForTest("notes-l.txt")
+            remote.seed("notes-r.txt", "kept-edit-r")
+            local.deleteForTest("notes-r.txt")
+            Fixture(local, remote, anc)
+        }
+    }
+
+    @Test
     fun `deletions survive a crash at any step and stay deleted`() = runTest {
         // Pins the delete-then-commit ordering: committing the ancestor first would,
         // on a crash in between, make the next pass see the survivor as CREATED and
