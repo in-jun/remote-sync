@@ -1,5 +1,6 @@
 package dev.injun.remotesync.sync
 
+import android.app.ForegroundServiceStartNotAllowedException
 import android.content.Context
 import android.content.Intent
 import android.os.Build
@@ -75,12 +76,31 @@ class SyncScheduler @Inject constructor(
         )
     }
 
+    /** Whether REALTIME mode is on, so [SyncForegroundService] is (or should be) running. */
+    fun isRealtimeServiceEnabled(): Boolean = statePrefs.getBoolean(KEY_REALTIME, false)
+
     private fun startForegroundService() {
         val intent = Intent(context, SyncForegroundService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            context.startForegroundService(intent)
-        } else {
-            context.startService(intent)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+        } catch (e: Exception) {
+            // API 31+ refuses a foreground-service start while the app is in the
+            // background (ForegroundServiceStartNotAllowedException). apply() runs from
+            // viewModelScope, which outlives the Activity, so an awaitLoaded() or
+            // sync-lock wait can complete after the app is backgrounded and reach here.
+            // Swallow it and rely on the WorkManager periodic backstop until the next
+            // foreground launch or boot restarts the service.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                e is ForegroundServiceStartNotAllowedException
+            ) {
+                Log.w(TAG, "Foreground service start refused from background", e)
+            } else {
+                throw e
+            }
         }
     }
 
