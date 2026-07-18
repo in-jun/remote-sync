@@ -24,7 +24,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.launch
 
@@ -85,8 +87,14 @@ class MainViewModel @Inject constructor(
         foregroundWatch?.cancel()
         foregroundWatch = viewModelScope.launch {
             config.awaitLoaded()
-            if (config.settings.value.mode != SyncMode.PERIODIC) return@launch
-            config.pairs
+            // Derive the watched pairs from the settings flow rather than reading the
+            // mode once: switching to REALTIME tears the in-app watch down (the
+            // foreground service takes over), and switching back to PERIODIC restarts
+            // it immediately instead of waiting for the next ON_RESUME.
+            combine(config.settings, config.pairs) { settings, pairs ->
+                if (settings.mode == SyncMode.PERIODIC) pairs else emptyList()
+            }
+                .distinctUntilChanged()
                 .flatMapLatest { changeTriggers.forPairs(it) }
                 .debounce(ChangeTriggers.DEBOUNCE_MS)
                 // Suspend inline (like SyncForegroundService) so debounce backpressures:

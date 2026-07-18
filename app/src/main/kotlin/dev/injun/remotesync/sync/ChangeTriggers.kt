@@ -4,6 +4,8 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.merge
 
 /**
@@ -20,10 +22,25 @@ class ChangeTriggers @Inject constructor(
         val flows = pairs.flatMap { pair ->
             listOf(
                 storages.local(pair).changes(),
-                storages.remote(pair.remote).changes(),
+                remoteChanges(pair.remote),
             )
         }
-        return merge(*flows.toTypedArray())
+        return flows.merge()
+    }
+
+    /**
+     * Owns the [RemoteStorage]'s lifecycle: the instance is created when collection
+     * starts and closed when it ends, honoring the [AutoCloseable] contract. Today's
+     * SMB [changes] happens to manage its own separate watch connection, but a backend
+     * whose watch reuses the main connection would otherwise leak one per resubscription.
+     */
+    private fun remoteChanges(config: RemoteConfig): Flow<Unit> = flow {
+        val remote = storages.remote(config)
+        try {
+            emitAll(remote.changes())
+        } finally {
+            remote.close()
+        }
     }
 
     companion object {

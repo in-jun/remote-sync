@@ -18,6 +18,7 @@ class DirectoryWatcher(
     private val mask = FileObserver.CREATE or
         FileObserver.CLOSE_WRITE or
         FileObserver.DELETE or
+        FileObserver.DELETE_SELF or
         FileObserver.MOVED_FROM or
         FileObserver.MOVED_TO or
         FileObserver.MOVE_SELF
@@ -47,17 +48,50 @@ class DirectoryWatcher(
     @Synchronized
     private fun observe(dir: File) {
         val path = dir.path
-        if (!running || observers.containsKey(path) || !dir.isDirectory) return
+        if (!running || !dir.isDirectory) return
+        // Replace rather than skip an existing entry: a delete+recreate at the same
+        // path gives the recreated directory a new inode whose inotify watch differs,
+        // so the old observer is dead and keeping it would leave the new tree unwatched.
+        observers.remove(path)?.stopWatching()
         val observer = object : FileObserver(path, mask) {
             override fun onEvent(event: Int, relPath: String?) {
+                // This watched directory itself was deleted or moved away — *_SELF
+                // events carry a null path, so identify it by the captured [dir] and
+                // drop its (now dead) observer so the map can't leak and the path can
+                // be re-watched if it comes back.
+                if (event and (DELETE_SELF or MOVE_SELF) != 0) {
+                    release(dir.path)
+                    onChange()
+                    return
+                }
                 if (relPath == null) return
                 val changed = File(dir, relPath)
-                // A new sub-directory needs its own observer for events to keep flowing.
-                if (event and CREATE != 0 && changed.isDirectory) observe(changed)
+                when {
+                    // A directory added under the tree (created or moved in, e.g. a bulk
+                    // import) needs observers attached recursively to keep events flowing.
+                    event and (CREATE or MOVED_TO) != 0 && changed.isDirectory ->
+                        observeTree(changed)
+                    // A directory removed from the tree: release its observer and any it
+                    // owned beneath it (already-dead watches, but the map must forget them).
+                    event and (DELETE or MOVED_FROM) != 0 -> releaseTree(changed.path)
+                }
                 onChange()
             }
         }
         observer.startWatching()
         observers[path] = observer
+    }
+
+    @Synchronized
+    private fun release(path: String) {
+        observers.remove(path)?.stopWatching()
+    }
+
+    @Synchronized
+    private fun releaseTree(path: String) {
+        val prefix = path + File.separator
+        observers.keys
+            .filter { it == path || it.startsWith(prefix) }
+            .forEach { observers.remove(it)?.stopWatching() }
     }
 }
