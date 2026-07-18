@@ -68,8 +68,7 @@ class SyncAlertNotifier @Inject constructor(
     }
 
     fun recordFailure(pair: SyncPair) {
-        val failures = prefs.getInt(failureKey(pair.id), 0) + 1
-        prefs.edit().putInt(failureKey(pair.id), failures).apply()
+        val failures = countFailure(pair.id)
         // Alert at the threshold, then re-alert every further N failures so a
         // dismissed notification does not hide a persistent problem forever.
         if (failures % FAILURE_ALERT_THRESHOLD == 0) {
@@ -78,6 +77,28 @@ class SyncAlertNotifier @Inject constructor(
                 "Sync keeps failing: ${pair.name}",
                 "$failures attempts in a row have failed; files are not being synced. " +
                     "Open the app to check the server settings.",
+            )
+        }
+    }
+
+    /**
+     * Counts a pass the system stopped before it finished. Shares the per-pair
+     * consecutive-failure counter with [recordFailure]: a file too large for the
+     * background execution budget is stopped at the same point every period, and
+     * that must eventually alert like any other persistent failure. Only the
+     * message differs — the remedy is real-time mode (no execution cap), not the
+     * server settings.
+     */
+    fun recordStopped(pair: SyncPair) {
+        val failures = countFailure(pair.id)
+        if (failures % FAILURE_ALERT_THRESHOLD == 0) {
+            postAlert(
+                alertId(pair.id),
+                "Sync can't finish: ${pair.name}",
+                "$failures attempts in a row have not completed; the system stopped " +
+                    "the last one mid-sync, so a large file may be restarting from " +
+                    "scratch every time. Real-time mode in the app has no background " +
+                    "time limit.",
             )
         }
     }
@@ -137,6 +158,12 @@ class SyncAlertNotifier @Inject constructor(
             context.getSystemService(NotificationManager::class.java)
                 .createNotificationChannel(channel)
         }
+    }
+
+    private fun countFailure(pairId: Long): Int {
+        val failures = prefs.getInt(failureKey(pairId), 0) + 1
+        prefs.edit().putInt(failureKey(pairId), failures).apply()
+        return failures
     }
 
     private fun failureKey(pairId: Long) = "f_$pairId"
