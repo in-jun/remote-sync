@@ -137,8 +137,13 @@ class SyncExecutor(
                 val remoteMeta = requireNotNull(c.remote)
                 val copyPath = ConflictNamer.conflictPath(c.path, remoteMeta)
 
+                if (!unchangedSinceScan(remote, c.path, remoteMeta)) return Outcome.Skipped
                 remote.writeAtomic(copyPath, remote.read(c.path))
                 local.writeAtomic(copyPath, remote.read(copyPath))
+                // The copy above is the only place the remote version survives; if the
+                // canonical was written again during those transfers, overwriting it now
+                // would destroy content no conflict copy holds.
+                if (!unchangedSinceScan(remote, c.path, remoteMeta)) return Outcome.Skipped
                 remote.writeAtomic(c.path, local.read(c.path))
 
                 commit(copyPath, writtenMeta(local, copyPath, remoteMeta), writtenMeta(remote, copyPath, remoteMeta))

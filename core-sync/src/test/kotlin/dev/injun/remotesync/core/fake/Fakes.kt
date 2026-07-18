@@ -6,6 +6,7 @@ import dev.injun.remotesync.core.port.AncestorRecord
 import dev.injun.remotesync.core.port.AncestorStore
 import dev.injun.remotesync.core.port.RawEntry
 import dev.injun.remotesync.core.port.Storage
+import java.io.IOException
 import java.security.MessageDigest
 import kotlin.coroutines.cancellation.CancellationException
 import okio.Buffer
@@ -72,7 +73,13 @@ class InMemoryStorage(private val fault: FaultController? = null) : Storage {
     // ---- test helpers (not part of the Storage contract) ----
     /** Runs after a scan's snapshot is taken — mutations here land between scan and apply. */
     var afterScanForTest: (() -> Unit)? = null
+    /** Runs before each atomic write — mutations here land mid-action. */
+    var beforeWriteForTest: ((String) -> Unit)? = null
+    /** Paths whose read throws, simulating a per-file I/O failure. */
+    val failingReadsForTest = mutableSetOf<String>()
     fun seed(path: String, content: String) { files[path] = Node(content.toByteArray(), clock++) }
+    /** Bump mtime without changing content. */
+    fun touchForTest(path: String) { files[path]?.let { files[path] = it.copy(mtime = clock++) } }
     fun deleteForTest(path: String) { files.remove(path) }
     fun contentOf(path: String): String? = files[path]?.let { String(it.bytes) }
     fun paths(): Set<String> = files.keys.toSet()
@@ -86,11 +93,13 @@ class InMemoryStorage(private val fault: FaultController? = null) : Storage {
     }
 
     override suspend fun read(path: String): Source {
+        if (path in failingReadsForTest) throw IOException("injected read failure: $path")
         val n = files[path] ?: throw NoSuchElementException("read missing: $path")
         return Buffer().write(n.bytes)
     }
 
     override suspend fun writeAtomic(path: String, content: Source) {
+        beforeWriteForTest?.invoke(path)
         val bytes = content.buffer().use { it.readByteArray() }
         fault?.step() // crash before the atomic swap → old file remains
         files[path] = Node(bytes, clock++)
