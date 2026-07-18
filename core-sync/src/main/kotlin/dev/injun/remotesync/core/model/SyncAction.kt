@@ -62,4 +62,12 @@ enum class ConflictKind {
      * no I/O; the user resolves it by renaming one of the files.
      */
     PATH_COLLISION,
+
+    /**
+     * The path is a file on one replica but a directory on the other (its name is a
+     * directory-prefix of other synced paths). Neither side can be propagated — a
+     * file cannot replace a directory or vice versa — so the executor performs no
+     * I/O; the user resolves it by removing or renaming one side.
+     */
+    FILE_DIR_COLLISION,
 }

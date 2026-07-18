@@ -321,6 +321,53 @@ class SyncEngineTest {
         assertEquals(0, plan.remoteDeletionCount)
     }
 
+    // ---- File vs directory mismatches (a path that is a dir-prefix of another) ----
+
+    @Test
+    fun `remote replaced a directory with a file - both paths become FILE_DIR_COLLISION`() {
+        val child = meta("child")
+        // Remote deleted "x/child" and created a FILE named "x"; propagating would
+        // delete local's child and then fail forever renaming a file onto dir "x".
+        val plan = reconcile(
+            local = Snapshot.of("x/child" to child),
+            remote = Snapshot.of("x" to meta("remoteFile")),
+            ancestor = Snapshot.of("x/child" to child),
+        )
+        val file = plan.action("x") as Conflict
+        assertEquals(ConflictKind.FILE_DIR_COLLISION, file.kind)
+        val nested = plan.action("x/child") as Conflict
+        assertEquals(ConflictKind.FILE_DIR_COLLISION, nested.kind)
+        // Ancestor stays untouched, so the mismatch is re-seen until resolved.
+        assertEquals(child, nested.ancestorAfter)
+        assertNull(file.ancestorAfter)
+        assertEquals(0, plan.localDeletionCount + plan.remoteDeletionCount)
+    }
+
+    @Test
+    fun `local replaced a file with a directory - push and delete are both blocked`() {
+        // Local replaced file "a" with directory "a/"; pushing "a/b/c.txt" would
+        // have to create directory "a" over the remote file it hasn't deleted yet.
+        val plan = reconcile(
+            local = Snapshot.of("a/b/c.txt" to meta("new")),
+            remote = Snapshot.of("a" to meta("v1")),
+            ancestor = Snapshot.of("a" to meta("v1")),
+        )
+        assertEquals(ConflictKind.FILE_DIR_COLLISION, (plan.action("a/b/c.txt") as Conflict).kind)
+        assertEquals(ConflictKind.FILE_DIR_COLLISION, (plan.action("a") as Conflict).kind)
+        assertEquals(0, plan.remoteDeletionCount)
+    }
+
+    @Test
+    fun `dir-prefix check folds case like the collision check`() {
+        val plan = reconcile(
+            local = Snapshot.of("Docs/note.txt" to meta("L")),
+            remote = Snapshot.of("docs" to meta("R")),
+            ancestor = Snapshot.EMPTY,
+        )
+        assertEquals(ConflictKind.FILE_DIR_COLLISION, (plan.action("Docs/note.txt") as Conflict).kind)
+        assertEquals(ConflictKind.FILE_DIR_COLLISION, (plan.action("docs") as Conflict).kind)
+    }
+
     @Test
     fun `independent paths are decided independently in one pass`() {
         val old = meta("v1")
