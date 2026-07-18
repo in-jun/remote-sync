@@ -32,8 +32,13 @@ class SyncManager @Inject constructor(
 ) {
     private val lock = Mutex()
 
-    suspend fun syncOnce(pair: SyncPair): SyncResult = lock.withLock {
+    suspend fun syncOnce(pair: SyncPair): SyncResult? = lock.withLock {
         config.awaitLoaded()
+        // Callers iterate pair-list snapshots, so [pair] may have been deleted since
+        // the loop started. deletePair tears down under this same lock, so a stale
+        // pass that ran here would re-record last-sync state, alerts, and ancestor
+        // rows for the dead id. Re-check while holding the lock and skip instead.
+        if (config.pair(pair.id) == null) return@withLock null
         val local = storages.local(pair)
         val ancestors = RoomAncestorStore(ancestorDao, pair.id)
         // The guard threshold is the global setting shown in Settings: one source of truth.

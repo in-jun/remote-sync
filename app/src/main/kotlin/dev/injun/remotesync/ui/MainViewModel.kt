@@ -125,14 +125,19 @@ class MainViewModel @Inject constructor(
 
     fun deletePair(id: Long) {
         viewModelScope.launch {
-            config.deletePair(id)
-            syncState.forget(id)
-            syncAlerts.forget(id)
+            // Tear down under the sync lock (like upsertPair's retarget path): an
+            // in-flight pass for this pair finishes first, so it cannot resurrect
+            // last-sync state or alerts after they are forgotten. The ancestor wipe
+            // also means a future pair can never inherit this pair's rows.
+            runCatching {
+                syncManager.forgetAncestors(id) {
+                    config.deletePair(id)
+                    syncState.forget(id)
+                    syncAlerts.forget(id)
+                }
+            }.onFailure { _error.value = errorText("Could not clear sync state", it) }
             _syncing.value = _syncing.value - id
             scheduler.apply(config.settings.value, config.isConfigured)
-            // Drop the pair's ancestor rows so a future pair can never inherit them.
-            runCatching { syncManager.forgetAncestors(id) }
-                .onFailure { _error.value = errorText("Could not clear sync state", it) }
             refreshConflicts()
         }
     }
@@ -145,7 +150,11 @@ class MainViewModel @Inject constructor(
     }
 
     fun syncPair(id: Long) {
-        if (!networkGate.allowsSync(config.settings.value)) return
+        if (!networkGate.allowsSync(config.settings.value)) {
+            // Automatic triggers skip silently, but an explicit tap needs feedback.
+            _error.value = SYNC_BLOCKED_MESSAGE
+            return
+        }
         val target = config.pair(id) ?: return
         if (id in _syncing.value) return
         _syncing.value = _syncing.value + id
@@ -159,10 +168,19 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    fun syncAll() {
+    /**
+     * Syncs every pair. [manual] marks an explicit user action (the toolbar button):
+     * a blocked manual sync surfaces the reason, while automatic triggers
+     * (foregrounding, change watch) stay silent — the network gate blocking them is
+     * routine, not news.
+     */
+    fun syncAll(manual: Boolean = false) {
         viewModelScope.launch {
             config.awaitLoaded()
-            if (!networkGate.allowsSync(config.settings.value)) return@launch
+            if (!networkGate.allowsSync(config.settings.value)) {
+                if (manual) _error.value = SYNC_BLOCKED_MESSAGE
+                return@launch
+            }
             for (pair in config.pairs.value) {
                 if (pair.id in _syncing.value) continue
                 _syncing.value = _syncing.value + pair.id
@@ -226,4 +244,10 @@ class MainViewModel @Inject constructor(
 
     private fun errorText(what: String, e: Throwable): String =
         "$what: ${e.message ?: e.javaClass.simpleName}"
+
+    private companion object {
+        // Matches the Settings label so the user knows which switch to flip.
+        const val SYNC_BLOCKED_MESSAGE =
+            "Sync skipped: \"Sync on Wi-Fi only\" is on and this network is metered"
+    }
 }
