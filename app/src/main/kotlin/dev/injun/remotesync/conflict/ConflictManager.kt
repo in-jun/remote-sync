@@ -39,6 +39,10 @@ enum class ConflictResolution {
     KEEP_BOTH,
 }
 
+/** The files changed after the conflict list was built; the decision is based on stale data. */
+class StaleConflictException :
+    IOException("the file changed since this conflict was reviewed; review it again")
+
 /**
  * Finds and resolves conflict copies (`*.conflict-<hash>`) in the local folder.
  * Resolution edits local files; the next sync propagates the result to the remote.
@@ -83,6 +87,19 @@ class ConflictManager @Inject constructor() {
         val canonical = File(root, item.originalPath)
         val copy = File(root, item.conflictCopyPath)
         if (!copy.isFile) return@withContext // already resolved
+
+        // The user decided from the state captured at scan time, but a background sync
+        // can rewrite the canonical file in between (e.g. pull a newer remote version).
+        // Discarding or overwriting content the user never saw would lose it on both
+        // replicas, so re-verify before the destructive resolutions and make the user
+        // review the fresh state instead. KEEP_BOTH preserves everything and needs no
+        // check.
+        if (resolution != ConflictResolution.KEEP_BOTH) {
+            val exists = canonical.isFile
+            val changed = exists != item.canonicalExists ||
+                (exists && (canonical.length() != item.localSize || canonical.lastModified() != item.localMtime))
+            if (changed) throw StaleConflictException()
+        }
 
         when (resolution) {
             ConflictResolution.KEEP_LOCAL -> {
