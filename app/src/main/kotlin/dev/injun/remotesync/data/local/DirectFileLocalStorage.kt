@@ -7,6 +7,7 @@ import dev.injun.remotesync.core.port.SnapshotBuilder
 import dev.injun.remotesync.core.port.Storage
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
@@ -29,10 +30,25 @@ import okio.source
 class DirectFileLocalStorage(private val root: File) : Storage {
 
     override suspend fun scan(hint: Snapshot): Snapshot = withContext(Dispatchers.IO) {
+        // A missing/unreadable root must fail the pass, not scan as empty: an empty
+        // snapshot would make the engine see every synced file as locally deleted
+        // and propagate those deletions to the remote.
+        if (!root.isDirectory || !root.canRead()) {
+            throw IOException("local sync root is not a readable directory: $root")
+        }
         val entries = ArrayList<RawEntry>()
         root.walkTopDown()
-            .filter { it.isFile && !isTempName(it.name) }
+            .filter { it.isFile }
             .forEach { f ->
+                if (isTempName(f.name)) {
+                    // Orphaned writeAtomic temp (process killed mid-write) — never a
+                    // sync entry. Remove it once no writer can still be using it; both
+                    // timestamps come from the device clock, so the age is reliable.
+                    if (System.currentTimeMillis() - f.lastModified() > STALE_TEMP_AGE_MS) {
+                        runCatching { f.delete() }
+                    }
+                    return@forEach
+                }
                 val rel = f.relativeTo(root).path.replace(File.separatorChar, '/')
                 entries.add(RawEntry(rel, f.length(), f.lastModified()))
             }
@@ -124,6 +140,9 @@ class DirectFileLocalStorage(private val root: File) : Storage {
 
     private companion object {
         val TEMP_NAME_REGEX = Regex("""^\..+\.tmp-\d+$""")
+
+        /** How old an orphaned writeAtomic temp must be before scan removes it. */
+        const val STALE_TEMP_AGE_MS = 60 * 60_000L
     }
 
     private fun hashFile(f: File): String {
