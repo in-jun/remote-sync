@@ -2,11 +2,15 @@ package dev.injun.remotesync.data.local
 
 import dev.injun.remotesync.core.exec.SyncExecutor
 import dev.injun.remotesync.core.exec.SyncResult
+import dev.injun.remotesync.core.model.Snapshot
 import dev.injun.remotesync.core.port.AncestorRecord
 import dev.injun.remotesync.core.port.AncestorStore
 import java.io.File
+import java.io.IOException
 import kotlinx.coroutines.test.runTest
+import okio.Buffer
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
@@ -74,5 +78,51 @@ class DirectFileLocalStorageTest {
         assertTrue(leftovers.isEmpty(), "temp files left behind: $leftovers")
         assertEquals("hello", read(b, "a.txt"))
         assertEquals("world", read(b, "sub/b.txt"))
+    }
+
+    @Test
+    fun `scan fails when the root is not a readable directory`(@TempDir a: File) = runTest {
+        val storage = DirectFileLocalStorage(File(a, "missing"))
+        val e = runCatching { storage.scan(Snapshot.EMPTY) }.exceptionOrNull()
+        assertTrue(e is IOException, "expected IOException, got: $e")
+    }
+
+    @Test
+    fun `scan hides only exact temp names, never look-alike user files`(@TempDir a: File) = runTest {
+        write(a, "doc.txt", "x")
+        write(a, ".doc.txt.tmp-123456", "half-written") // exact writeAtomic shape
+        write(a, ".env.tmp-backup", "x") // suffix is not digits
+        write(a, "x.tmp-5", "x") // no leading dot
+        write(a, ".a.tmp-12x", "x") // digits followed by junk
+
+        val snapshot = DirectFileLocalStorage(a).scan(Snapshot.EMPTY)
+        assertEquals(setOf("doc.txt", ".env.tmp-backup", "x.tmp-5", ".a.tmp-12x"), snapshot.paths)
+    }
+
+    @Test
+    fun `scan reaps stale orphaned temps but keeps fresh ones`(@TempDir a: File) = runTest {
+        write(a, ".old.kdbx.tmp-1", "orphan")
+        write(a, ".new.kdbx.tmp-2", "in flight")
+        val old = File(a, ".old.kdbx.tmp-1")
+        assertTrue(old.setLastModified(System.currentTimeMillis() - 2 * 60 * 60_000L))
+
+        DirectFileLocalStorage(a).scan(Snapshot.EMPTY)
+        assertFalse(old.exists(), "stale temp should have been removed")
+        assertTrue(File(a, ".new.kdbx.tmp-2").exists(), "fresh temp must not be removed")
+    }
+
+    @Test
+    fun `paths escaping the root are rejected and nothing is written outside it`(
+        @TempDir parent: File,
+    ) = runTest {
+        val rootDir = File(parent, "root").apply { mkdirs() }
+        val storage = DirectFileLocalStorage(rootDir)
+
+        assertTrue(runCatching { storage.writeAtomic("../escape.txt", Buffer().writeUtf8("x")) }.isFailure)
+        assertTrue(runCatching { storage.read("../escape.txt") }.isFailure)
+        assertTrue(runCatching { storage.delete("../escape.txt") }.isFailure)
+
+        assertFalse(File(parent, "escape.txt").exists(), "file escaped the sync root")
+        assertTrue(parent.listFiles()!!.map { it.name } == listOf("root"), "unexpected files outside root")
     }
 }
