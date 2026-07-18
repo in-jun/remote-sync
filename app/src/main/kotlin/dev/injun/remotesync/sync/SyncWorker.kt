@@ -28,6 +28,7 @@ class SyncWorker @AssistedInject constructor(
     private val syncManager: SyncManager,
     private val config: ConfigRepository,
     private val alerts: SyncAlertNotifier,
+    private val scheduler: SyncScheduler,
 ) : CoroutineWorker(context, params) {
 
     override suspend fun doWork(): Result {
@@ -36,14 +37,20 @@ class SyncWorker @AssistedInject constructor(
         // Promote to a foreground worker so long passes can finish; if the system
         // forbids the promotion right now (background FGS start restrictions),
         // proceed with the default execution budget instead.
-        try {
-            setForeground(getForegroundInfo())
-        } catch (e: IllegalStateException) {
-            // Common on Android 12+ when the job fires with the app backgrounded and
-            // no battery-optimization exemption: the pass still runs, but under the
-            // default budget, so a long transfer may be stopped mid-pass — which is
-            // exactly what recordIfStoppedMidPass below keeps from staying silent.
-            Log.w(TAG, "Foreground promotion rejected; using the default execution budget", e)
+        //
+        // Skip the promotion in REALTIME mode: SyncForegroundService already holds an
+        // ongoing status notification on this channel, so promoting here too would post
+        // a second, redundant "Syncing files" notification for the backstop pass.
+        if (!scheduler.isRealtimeServiceEnabled()) {
+            try {
+                setForeground(getForegroundInfo())
+            } catch (e: IllegalStateException) {
+                // Common on Android 12+ when the job fires with the app backgrounded and
+                // no battery-optimization exemption: the pass still runs, but under the
+                // default budget, so a long transfer may be stopped mid-pass — which is
+                // exactly what recordIfStoppedMidPass below keeps from staying silent.
+                Log.w(TAG, "Foreground promotion rejected; using the default execution budget", e)
+            }
         }
         config.awaitLoaded()
         val pairs = config.pairs.value
