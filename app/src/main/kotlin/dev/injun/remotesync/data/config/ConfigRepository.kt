@@ -178,26 +178,49 @@ class ConfigRepository @Inject constructor(
     private fun loadPairs(): List<SyncPair> {
         val json = prefs.getString(KEY_PAIRS, null)
         if (json == null) return migrateLegacy()
+        // Earlier builds migrated the legacy layout without deleting its keys, leaving
+        // a stale credential copy behind; purge it if it is still present.
+        if (prefs.getBoolean("configured", false)) {
+            prefs.edit().apply {
+                LEGACY_KEYS.forEach { remove(it) }
+                apply()
+            }
+        }
         val arr = try {
             JSONArray(json)
         } catch (e: JSONException) {
-            Log.e(TAG, "Pair list JSON is unreadable", e)
+            Log.e(TAG, "Pair list JSON is unreadable: ${describeParseError(e)}")
             backupUnreadablePairs(json)
             return emptyList()
         }
         // Parse per entry so one malformed pair drops only itself, not the whole list.
         val pairs = (0 until arr.length()).mapNotNull { i ->
             runCatching { parsePair(arr.getJSONObject(i)) }
-                .onFailure { Log.e(TAG, "Skipping malformed pair entry $i", it) }
+                .onFailure { Log.e(TAG, "Skipping malformed pair entry $i: ${describeParseError(it)}") }
                 .getOrNull()
         }
-        if (pairs.size < arr.length()) backupUnreadablePairs(json)
+        if (pairs.size < arr.length()) {
+            backupUnreadablePairs(json)
+        } else if (prefs.contains(KEY_PAIRS_BACKUP)) {
+            // Every entry parsed, so a backup from an earlier failed load is stale.
+            prefs.edit().remove(KEY_PAIRS_BACKUP).apply()
+        }
         return pairs
     }
 
+    // org.json embeds the entire input in its exception messages, and the pair JSON
+    // holds plaintext passwords — never log these exceptions directly. Keep only the
+    // class and the character position.
+    private fun describeParseError(e: Throwable): String {
+        val position = e.message?.let { POSITION_REGEX.find(it)?.value }
+        return listOfNotNull(e.javaClass.simpleName, position).joinToString(" ")
+    }
+
     private fun parsePair(o: JSONObject): SyncPair {
-        val protocol = runCatching { Protocol.valueOf(o.optString("protocol")) }
-            .getOrDefault(Protocol.SMB)
+        // An unknown tag must fail this entry so the raw JSON is preserved via
+        // backupUnreadablePairs; falling back to SMB would "parse" an empty config
+        // and let the next persist() overwrite the original entry.
+        val protocol = Protocol.valueOf(o.getString("protocol"))
         return SyncPair(
             id = o.getLong("id"),
             name = o.optString("name", "Folder pair"),
@@ -240,7 +263,13 @@ class ConfigRepository @Inject constructor(
                 rootPath = prefs.getString("smb_root_path", "").orEmpty(),
             ),
         )
-        prefs.edit().putString(KEY_PAIRS, toJson(listOf(legacy))).apply()
+        // Drop the legacy keys in the same edit so the old credentials do not live on
+        // as a second copy after deletes or password changes only rewrite KEY_PAIRS.
+        prefs.edit().apply {
+            putString(KEY_PAIRS, toJson(listOf(legacy)))
+            LEGACY_KEYS.forEach { remove(it) }
+            apply()
+        }
         return listOf(legacy)
     }
 
@@ -261,5 +290,10 @@ class ConfigRepository @Inject constructor(
         const val KEY_INTERVAL = "interval"
         const val KEY_MAX_DELETE = "max_delete"
         const val KEY_WIFI_ONLY = "wifi_only"
+        val LEGACY_KEYS = listOf(
+            "configured", "local_root", "smb_host", "smb_port", "smb_share",
+            "smb_domain", "smb_user", "smb_pass", "smb_root_path",
+        )
+        val POSITION_REGEX = Regex("""at character \d+""")
     }
 }
