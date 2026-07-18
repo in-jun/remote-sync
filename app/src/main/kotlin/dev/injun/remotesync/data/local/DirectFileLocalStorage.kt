@@ -58,7 +58,7 @@ class DirectFileLocalStorage(private val root: File) : Storage {
                 val rel = f.relativeTo(root).path.replace(File.separatorChar, '/')
                 entries.add(RawEntry(rel, f.length(), f.lastModified()))
             }
-        SnapshotBuilder.build(entries, hint) { path -> hashFile(resolve(path)) }
+        SnapshotBuilder.build(entries, hint, System.currentTimeMillis()) { path -> hashFile(resolve(path)) }
     }
 
     override suspend fun read(path: String): Source = withContext(Dispatchers.IO) {
