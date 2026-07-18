@@ -26,6 +26,9 @@ import dev.injun.remotesync.sync.SmbConfig
 import java.io.IOException
 import java.security.MessageDigest
 import java.util.EnumSet
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
@@ -308,13 +311,8 @@ class SmbRemoteStorage(
             .replace('/', '\\')
     }
 
-    // Reject relative paths whose segments would escape the configured rootPath once
-    // the server resolves them: '\' is a path separator on SMB but a legal character
-    // in local filenames, and '..' climbs out. Mirrors the local resolve() guard.
     private fun requireSafeRel(rel: String) {
-        require(rel.isEmpty() || rel.split('/').none { it.isEmpty() || it == "." || it == ".." || '\\' in it }) {
-            "path escapes sync root: $rel"
-        }
+        require(SmbRelPath.isSafe(rel)) { "path escapes sync root: $rel" }
     }
 
     private fun tempSibling(finalPath: String): String {
@@ -357,8 +355,35 @@ class SmbRemoteStorage(
                             null,
                         )
                         while (isActive) {
-                            // Blocks until the server reports a change (recursively via watchTree).
-                            dir.watchAsync(WATCH_FILTERS, true).get()
+                            // Blocks until the server reports a change (recursively via
+                            // watchTree). The long poll legitimately never completes while
+                            // nothing changes, so a raw get() would also never return on a
+                            // dead transport (half-open TCP after NAS power loss): no
+                            // exception, no reconnect, push silently dead. Bound the wait
+                            // and, on each timeout, query the watched handle — that round
+                            // trip uses smbj's bounded transaction timeout, so a dead
+                            // connection throws and re-enters the backoff path.
+                            // smbj's PromiseBackedFuture wraps the wait timeout before
+                            // rethrowing, so it surfaces as ExecutionException(cause:
+                            // SMBRuntimeException(cause: TimeoutException)) rather than a
+                            // bare TimeoutException — match by cause chain, like
+                            // isChangeNotifyUnsupported. Anything else is a real failure
+                            // and must reach the reconnect path.
+                            val pending = dir.watchAsync(WATCH_FILTERS, true)
+                            while (isActive) {
+                                try {
+                                    pending.get(WATCH_PROBE_INTERVAL_MS, TimeUnit.MILLISECONDS)
+                                    break
+                                } catch (e: TimeoutException) {
+                                    dir.fileInformation
+                                    backoffMs = WATCH_RETRY_MIN_MS
+                                } catch (e: ExecutionException) {
+                                    if (!isWaitTimeout(e)) throw e
+                                    dir.fileInformation
+                                    backoffMs = WATCH_RETRY_MIN_MS
+                                }
+                            }
+                            if (!isActive) break
                             backoffMs = WATCH_RETRY_MIN_MS
                             trySend(Unit)
                         }
@@ -393,6 +418,16 @@ class SmbRemoteStorage(
         }
     }.flowOn(Dispatchers.IO)
 
+    /** True when the exception chain bottoms out in the probe wait expiring (no change yet). */
+    private fun isWaitTimeout(e: Exception): Boolean {
+        var cause: Throwable? = e
+        while (cause != null) {
+            if (cause is TimeoutException) return true
+            cause = cause.cause
+        }
+        return false
+    }
+
     private fun isChangeNotifyUnsupported(e: Exception): Boolean {
         var cause: Throwable? = e
         while (cause != null) {
@@ -422,6 +457,14 @@ class SmbRemoteStorage(
         const val WATCH_RETRY_MAX_MS = 5 * 60_000L
 
         /**
+         * How long one CHANGE_NOTIFY wait may sit before the watch connection is
+         * probed for liveness. Long enough that an idle watch stays a cheap long
+         * poll, short enough that a stranded socket is noticed well before the
+         * periodic safety poll would paper over it.
+         */
+        const val WATCH_PROBE_INTERVAL_MS = 2 * 60_000L
+
+        /**
          * smbj defaults leave message signing and encryption OFF, so an on-network
          * attacker could read or tamper with synced content in transit. Require both,
          * and offer only SMB 3.x dialects: `withEncryptData` is honored solely on a
@@ -446,4 +489,16 @@ class SmbRemoteStorage(
             SMB2CompletionFilter.FILE_NOTIFY_CHANGE_CREATION,
         )
     }
+}
+
+/**
+ * Guard for '/'-relative sync paths headed to an SMB share. A segment that is empty,
+ * '.', '..', or contains '\' would resolve outside the configured rootPath once the
+ * server treats it as a separator ('\' is legal in local filenames but IS the
+ * separator on the wire). Mirrors the local resolve() guard; kept as a pure object
+ * so it is unit-testable without a connection.
+ */
+internal object SmbRelPath {
+    fun isSafe(rel: String): Boolean =
+        rel.isEmpty() || rel.split('/').none { it.isEmpty() || it == "." || it == ".." || '\\' in it }
 }
