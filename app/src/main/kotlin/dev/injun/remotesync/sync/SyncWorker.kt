@@ -1,8 +1,12 @@
 package dev.injun.remotesync.sync
 
 import android.content.Context
+import android.content.pm.ServiceInfo
+import android.os.Build
+import androidx.core.app.NotificationCompat
 import androidx.hilt.work.HiltWorker
 import androidx.work.CoroutineWorker
+import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
@@ -23,6 +27,15 @@ class SyncWorker @AssistedInject constructor(
 ) : CoroutineWorker(context, params) {
 
     override suspend fun doWork(): Result {
+        // Plain workers are stopped after ~10 minutes, which would cancel a large
+        // whole-file SMB transfer every pass and leave that file unsynced forever.
+        // Promote to a foreground worker so long passes can finish; if the system
+        // forbids the promotion right now (background FGS start restrictions),
+        // proceed with the default execution budget instead.
+        try {
+            setForeground(getForegroundInfo())
+        } catch (_: IllegalStateException) {
+        }
         config.awaitLoaded()
         val pairs = config.pairs.value
         if (pairs.isEmpty()) return Result.success()
@@ -46,7 +59,29 @@ class SyncWorker @AssistedInject constructor(
         return if (transientFailure) Result.retry() else Result.success()
     }
 
+    override suspend fun getForegroundInfo(): ForegroundInfo {
+        SyncForegroundService.createChannel(applicationContext)
+        val notification =
+            NotificationCompat.Builder(applicationContext, SyncForegroundService.CHANNEL_ID)
+                .setContentTitle("Remote Sync")
+                .setContentText("Syncing files")
+                .setSmallIcon(android.R.drawable.stat_notify_sync)
+                .setOngoing(true)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .build()
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            ForegroundInfo(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
+            )
+        } else {
+            ForegroundInfo(NOTIFICATION_ID, notification)
+        }
+    }
+
     companion object {
         const val UNIQUE_NAME = "remote-sync-periodic"
+        private const val NOTIFICATION_ID = 1002
     }
 }

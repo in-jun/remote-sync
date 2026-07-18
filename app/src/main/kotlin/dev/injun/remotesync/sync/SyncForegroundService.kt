@@ -3,6 +3,7 @@ package dev.injun.remotesync.sync
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
@@ -65,7 +66,7 @@ class SyncForegroundService : Service() {
     @OptIn(FlowPreview::class, ExperimentalCoroutinesApi::class)
     override fun onCreate() {
         super.onCreate()
-        createChannel()
+        createChannel(this)
         ServiceCompat.startForeground(
             this,
             NOTIFICATION_ID,
@@ -124,17 +125,6 @@ class SyncForegroundService : Service() {
         super.onDestroy()
     }
 
-    private fun createChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "Sync",
-                NotificationManager.IMPORTANCE_LOW,
-            ).apply { description = "Background sync status" }
-            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
-        }
-    }
-
     private fun buildNotification() =
         NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Remote Sync")
@@ -144,10 +134,23 @@ class SyncForegroundService : Service() {
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
 
-    private companion object {
-        const val TAG = "SyncForegroundService"
+    companion object {
         const val CHANNEL_ID = "sync_status"
-        const val NOTIFICATION_ID = 1001
-        const val SAFETY_POLL_MINUTES = 10L
+        private const val TAG = "SyncForegroundService"
+        private const val NOTIFICATION_ID = 1001
+        private const val SAFETY_POLL_MINUTES = 10L
+
+        /** Idempotent; also used by [SyncWorker] when it promotes itself to foreground. */
+        fun createChannel(context: Context) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val channel = NotificationChannel(
+                    CHANNEL_ID,
+                    "Sync",
+                    NotificationManager.IMPORTANCE_LOW,
+                ).apply { description = "Background sync status" }
+                context.getSystemService(NotificationManager::class.java)
+                    .createNotificationChannel(channel)
+            }
+        }
     }
 }

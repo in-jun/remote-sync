@@ -57,6 +57,18 @@
                 android:value="Continuous bidirectional file synchronization with a user-configured server" />
         </service>
 
+        <!-- WorkManager's foreground service, used when SyncWorker promotes a long
+             pass so the ~10-minute background execution limit does not cancel large
+             transfers mid-file. Needs the same specialUse type as the sync service. -->
+        <service
+            android:name="androidx.work.impl.foreground.SystemForegroundService"
+            android:foregroundServiceType="specialUse"
+            tools:node="merge">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Continuous bidirectional file synchronization with a user-configured server" />
+        </service>
+
         <receiver
             android:name=".sync.BootReceiver"
             android:exported="false">
