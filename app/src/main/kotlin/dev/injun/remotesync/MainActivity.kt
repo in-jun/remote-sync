@@ -57,6 +57,7 @@ private fun AppRoot(viewModel: MainViewModel) {
     val syncing by viewModel.syncing.collectAsState()
     val lastSync by viewModel.lastSync.collectAsState()
     val conflicts by viewModel.conflicts.collectAsState()
+    val resolving by viewModel.resolving.collectAsState()
     val hasAccess = rememberAllFilesAccess()
     val requestStorageAccess = rememberStorageAccessRequest()
     val canNotify = rememberNotificationAccess()
@@ -158,6 +159,7 @@ private fun AppRoot(viewModel: MainViewModel) {
 
         Screen.CONFLICTS -> ConflictsScreen(
             conflicts = conflicts,
+            resolving = resolving,
             onResolve = viewModel::resolveConflict,
             onBack = { screen = Screen.HOME },
         )

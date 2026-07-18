@@ -57,6 +57,10 @@ class MainViewModel @Inject constructor(
     private val _conflicts = MutableStateFlow<List<ConflictItem>>(emptyList())
     val conflicts: StateFlow<List<ConflictItem>> = _conflicts.asStateFlow()
 
+    /** Conflicts (by [ConflictItem.key]) whose resolution + follow-up sync are in flight. */
+    private val _resolving = MutableStateFlow<Set<String>>(emptySet())
+    val resolving: StateFlow<Set<String>> = _resolving.asStateFlow()
+
     private val _error = MutableStateFlow<String?>(null)
 
     /** Last operation error to surface to the user; cleared via [clearError] once shown. */
@@ -220,18 +224,26 @@ class MainViewModel @Inject constructor(
 
     fun resolveConflict(item: ConflictItem, resolution: ConflictResolution) {
         val pair = config.pair(item.pairId) ?: return
+        // Ignore re-taps while this conflict is already being resolved so the UI's
+        // disabled state and ConflictManager's "already resolved" no-op agree.
+        if (item.key in _resolving.value) return
+        _resolving.value = _resolving.value + item.key
         viewModelScope.launch {
-            // Resolution rewrites files inside the sync root, so take the sync lock:
-            // racing a pass would commit ancestors that no longer match the local file.
-            val resolved = runCatching {
-                syncManager.withSyncLock {
-                    conflictManager.resolve(pair, item, resolution)
-                }
-            }.onFailure { _error.value = errorText("Could not resolve conflict", it) }
-            refreshConflicts()
-            if (resolved.isSuccess) {
-                trySync(pair)
+            try {
+                // Resolution rewrites files inside the sync root, so take the sync lock:
+                // racing a pass would commit ancestors that no longer match the local file.
+                val resolved = runCatching {
+                    syncManager.withSyncLock {
+                        conflictManager.resolve(pair, item, resolution)
+                    }
+                }.onFailure { _error.value = errorText("Could not resolve conflict", it) }
                 refreshConflicts()
+                if (resolved.isSuccess) {
+                    trySync(pair)
+                    refreshConflicts()
+                }
+            } finally {
+                _resolving.value = _resolving.value - item.key
             }
         }
     }
