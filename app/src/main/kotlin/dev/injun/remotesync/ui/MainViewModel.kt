@@ -203,9 +203,7 @@ class MainViewModel @Inject constructor(
         viewModelScope.launch {
             config.awaitLoaded()
             runCatching {
-                config.pairs.value.flatMap {
-                    conflictManager.scan(it.id, it.name, it.localRoot)
-                }
+                config.pairs.value.flatMap { conflictManager.scan(it) }
             }
                 .onSuccess { _conflicts.value = it }
                 .onFailure { _error.value = errorText("Could not scan for conflicts", it) }
@@ -219,7 +217,7 @@ class MainViewModel @Inject constructor(
             // racing a pass would commit ancestors that no longer match the local file.
             val resolved = runCatching {
                 syncManager.withSyncLock {
-                    conflictManager.resolve(pair.localRoot, item, resolution)
+                    conflictManager.resolve(pair, item, resolution)
                 }
             }.onFailure { _error.value = errorText("Could not resolve conflict", it) }
             refreshConflicts()
