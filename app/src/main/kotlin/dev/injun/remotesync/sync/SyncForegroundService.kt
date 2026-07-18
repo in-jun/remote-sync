@@ -46,13 +46,16 @@ class SyncForegroundService : Service() {
     @Inject lateinit var config: ConfigRepository
     @Inject lateinit var networkGate: NetworkGate
     @Inject lateinit var changeTriggers: ChangeTriggers
+    @Inject lateinit var alertNotifier: SyncAlertNotifier
 
     // Backstop: an escaped exception should stop the service, not crash the process
-    // into a START_STICKY restart loop.
+    // into a START_STICKY restart loop. Alert the user first — otherwise realtime
+    // sync silently degrades to the periodic job until the next app launch.
     private val scope = CoroutineScope(
         SupervisorJob() + Dispatchers.Default +
             CoroutineExceptionHandler { _, e ->
                 Log.e(TAG, "Sync loop failed", e)
+                runCatching { alertNotifier.notifyRealtimeStopped() }
                 stopSelf()
             },
     )
@@ -74,6 +77,7 @@ class SyncForegroundService : Service() {
             },
         )
 
+        alertNotifier.clearRealtimeStopped()
         scope.launch {
             config.awaitLoaded()
             if (config.pairs.value.isEmpty()) {
