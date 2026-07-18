@@ -13,7 +13,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.platform.LocalContext
@@ -67,10 +67,10 @@ private fun AppRoot(viewModel: MainViewModel) {
     val configLoaded by viewModel.configLoaded.collectAsState()
     if (!configLoaded) return
 
-    var screen by remember { mutableStateOf(if (pairs.isEmpty()) Screen.PROTOCOL else Screen.HOME) }
-    var editingId by remember { mutableStateOf<Long?>(null) }
+    var screen by rememberSaveable { mutableStateOf(if (pairs.isEmpty()) Screen.PROTOCOL else Screen.HOME) }
+    var editingId by rememberSaveable { mutableStateOf<Long?>(null) }
     // Protocol chosen for a NEW pair (picked before the form).
-    var newProtocol by remember { mutableStateOf(Protocol.SMB) }
+    var newProtocol by rememberSaveable { mutableStateOf(Protocol.SMB) }
 
     LaunchedEffect(pairs.isEmpty()) {
         if (pairs.isEmpty() && screen == Screen.HOME) screen = Screen.PROTOCOL
