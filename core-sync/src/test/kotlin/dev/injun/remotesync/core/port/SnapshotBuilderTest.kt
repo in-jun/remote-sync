@@ -120,6 +120,44 @@ class SnapshotBuilderTest {
     }
 
     @Test
+    fun `re-hashes a settled stat match when the hint was recorded while racy`() = runTest {
+        // Issue #51, the case a now-anchored guard misses: the hint (10, settledMtime,
+        // "stored") was written while its bucket was still open, and a same-size edit
+        // then landed in that same bucket. On this scan the mtime looks settled against
+        // the clock and the stat matches, yet the recorded hash is stale — the racy flag
+        // on the hint is the only thing that survives to force the re-hash.
+        val h = LiveHash()
+        val out = SnapshotBuilder.build(
+            entries = listOf(RawEntry("a", 10, settledMtime)),
+            hint = hint("a" to FileMeta(10, settledMtime, "stored", racyMtime = true)),
+            nowMillis = now,
+            hash = h.fn,
+        )
+        assertEquals("live:a", out["a"]!!.contentHash)
+        assertEquals(listOf("a"), h.calls)
+    }
+
+    @Test
+    fun `flags a scanned entry racy while its mtime is unsettled and clears it once settled`() = runTest {
+        val racy = SnapshotBuilder.build(
+            entries = listOf(RawEntry("a", 10, racyMtime)),
+            hint = Snapshot.EMPTY,
+            nowMillis = now,
+            hash = LiveHash().fn,
+        )
+        // A within-window mtime is carried as racy so the next pass re-checks the bucket.
+        assertEquals(true, racy["a"]!!.racyMtime)
+
+        val settled = SnapshotBuilder.build(
+            entries = listOf(RawEntry("a", 10, settledMtime)),
+            hint = Snapshot.EMPTY,
+            nowMillis = now,
+            hash = LiveHash().fn,
+        )
+        assertEquals(false, settled["a"]!!.racyMtime)
+    }
+
+    @Test
     fun `reuses only the settled entries in a mixed listing`() = runTest {
         val h = LiveHash()
         val out = SnapshotBuilder.build(
