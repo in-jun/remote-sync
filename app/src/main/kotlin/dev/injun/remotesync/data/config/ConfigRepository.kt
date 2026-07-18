@@ -228,7 +228,7 @@ class ConfigRepository @Inject constructor(
             remote = when (protocol) {
                 Protocol.SMB -> SmbConfig(
                     host = o.optString("host"),
-                    port = o.optInt("port", 445),
+                    port = o.optInt("port", SmbConfig.DEFAULT_PORT),
                     shareName = o.optString("share"),
                     domain = o.optString("domain"),
                     username = o.optString("user"),
@@ -255,7 +255,7 @@ class ConfigRepository @Inject constructor(
             localRoot = prefs.getString("local_root", "").orEmpty(),
             remote = SmbConfig(
                 host = prefs.getString("smb_host", "").orEmpty(),
-                port = prefs.getInt("smb_port", 445),
+                port = prefs.getInt("smb_port", SmbConfig.DEFAULT_PORT),
                 shareName = prefs.getString("smb_share", "").orEmpty(),
                 domain = prefs.getString("smb_domain", "").orEmpty(),
                 username = prefs.getString("smb_user", "").orEmpty(),
