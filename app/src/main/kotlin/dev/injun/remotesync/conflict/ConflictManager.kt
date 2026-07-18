@@ -1,6 +1,7 @@
 package dev.injun.remotesync.conflict
 
 import dev.injun.remotesync.core.exec.ConflictNamer
+import dev.injun.remotesync.core.port.TempFiles
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
@@ -107,7 +108,7 @@ class ConflictManager @Inject constructor() {
             }
             ConflictResolution.KEEP_REMOTE -> {
                 canonical.parentFile?.mkdirs()
-                val tmp = File(canonical.parentFile, ".${canonical.name}.tmp-${System.nanoTime()}")
+                val tmp = File(canonical.parentFile, TempFiles.nameFor(canonical.name))
                 copy.copyTo(tmp, overwrite = true)
                 Files.move(
                     tmp.toPath(),

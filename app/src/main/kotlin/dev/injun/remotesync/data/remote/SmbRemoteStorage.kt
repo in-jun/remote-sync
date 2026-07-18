@@ -20,6 +20,7 @@ import dev.injun.remotesync.core.model.Snapshot
 import dev.injun.remotesync.core.port.RawEntry
 import dev.injun.remotesync.core.port.SnapshotBuilder
 import dev.injun.remotesync.core.port.Storage
+import dev.injun.remotesync.core.port.TempFiles
 import dev.injun.remotesync.sync.RemoteStorage
 import dev.injun.remotesync.sync.SmbConfig
 import java.io.IOException
@@ -90,12 +91,19 @@ class SmbRemoteStorage(
     override suspend fun scan(hint: Snapshot): Snapshot = withContext(Dispatchers.IO) {
         val disk = share()
         val entries = ArrayList<RawEntry>()
-        // Tolerate a not-yet-existing sync root (first sync to a fresh remote folder):
-        // treat it as empty rather than failing. The first write creates it.
         val rootSmb = smbPath("")
         if (rootSmb.isEmpty() || disk.folderExists(rootSmb)) {
             walk(disk, "", entries)
+        } else if (hint.files.isNotEmpty()) {
+            // The root has been synced before (the hint carries its files), so its
+            // absence now means a renamed/removed remote folder or a transient share
+            // failure. Scanning it as empty would make the engine see every synced
+            // file as remotely deleted and delete them all locally — fail the pass
+            // instead, mirroring the local-side guard in DirectFileLocalStorage.
+            throw IOException("remote sync root disappeared: ${config.rootPath} on ${config.shareName}")
         }
+        // A missing root with an empty hint is a first sync to a fresh remote folder:
+        // empty is correct, and the first write creates it.
         SnapshotBuilder.build(entries, hint) { path -> hashRemote(disk, path) }
     }
 
@@ -105,12 +113,12 @@ class SmbRemoteStorage(
             if (name == "." || name == "..") continue
             val childRel = if (dirRel.isEmpty()) name else "$dirRel/$name"
             val isDir = (info.fileAttributes and FileAttributes.FILE_ATTRIBUTE_DIRECTORY.value) != 0L
-            if (!isDir && isTempName(name)) {
+            if (!isDir && TempFiles.isTempName(name)) {
                 // In-flight or orphaned writeAtomic temp (ours or another device's) —
                 // never a sync entry. Remove it only once it is old enough that no
                 // writer can still be streaming into it.
                 val ageMs = serverNowMillis()?.let { it - info.lastWriteTime.toEpochMillis() }
-                if (ageMs != null && ageMs > STALE_TEMP_AGE_MS) runCatching { disk.rm(smbPath(childRel)) }
+                if (ageMs != null && ageMs > TempFiles.STALE_AGE_MS) runCatching { disk.rm(smbPath(childRel)) }
                 continue
             }
             if (isDir) {
@@ -308,18 +316,11 @@ class SmbRemoteStorage(
         }
     }
 
-    // Same recognizable ".<name>.tmp-<nano>" pattern as the local storage, so both
-    // sides' scans skip in-flight/orphaned temps instead of syncing them.
     private fun tempSibling(finalPath: String): String {
         val dir = finalPath.substringBeforeLast('\\', "")
-        val name = ".${finalPath.substringAfterLast('\\')}.tmp-${System.nanoTime()}"
+        val name = TempFiles.nameFor(finalPath.substringAfterLast('\\'))
         return if (dir.isEmpty()) name else "$dir\\$name"
     }
-
-    // Match ONLY the exact generated shape above. Anything looser would silently
-    // exclude — and after an hour delete — real user files whose names merely
-    // resemble a temp (e.g. ".env.tmp-backup").
-    private fun isTempName(name: String): Boolean = TEMP_NAME_REGEX.matches(name)
 
     /**
      * Remote push via SMB2 CHANGE_NOTIFY on a dedicated watch connection. Transient
@@ -415,12 +416,6 @@ class SmbRemoteStorage(
         /** Reconnect backoff for the CHANGE_NOTIFY watch loop. */
         const val WATCH_RETRY_MIN_MS = 5_000L
         const val WATCH_RETRY_MAX_MS = 5 * 60_000L
-
-        /** How old an orphaned writeAtomic temp must be before scan removes it. */
-        const val STALE_TEMP_AGE_MS = 60 * 60_000L
-
-        /** Exactly the ".<name>.tmp-<nano>" shape produced by [tempSibling]. */
-        val TEMP_NAME_REGEX = Regex("""^\..+\.tmp-\d+$""")
 
         /**
          * smbj defaults leave message signing and encryption OFF, so an on-network
