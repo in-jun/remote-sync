@@ -32,6 +32,7 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -383,11 +384,14 @@ class SmbRemoteStorage(
         awaitClose {
             job.cancel()
             // The loop blocks inside smbj calls that never observe cancellation;
-            // closing the connection from here is what unblocks them.
+            // closing the connection from here is what unblocks them. flowOn keeps
+            // this socket I/O off the collector's dispatcher (the UI watches from
+            // Main, where it would throw NetworkOnMainThreadException and leak the
+            // connection).
             runCatching { watchConn?.close() }
             runCatching { watchClient?.close() }
         }
-    }
+    }.flowOn(Dispatchers.IO)
 
     private fun isChangeNotifyUnsupported(e: Exception): Boolean {
         var cause: Throwable? = e
