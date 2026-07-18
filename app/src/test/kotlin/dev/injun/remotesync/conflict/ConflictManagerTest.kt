@@ -180,6 +180,34 @@ class ConflictManagerTest {
     }
 
     @Test
+    fun `keep local refuses when the conflict copy changed after the scan`(@TempDir root: File) = runTest {
+        write(root, "db.kdbx", "local")
+        write(root, "db.kdbx.conflict-9f86d081", "old remote")
+        val item = scanOne(root)
+
+        // A background sync pulls a newer remote version into the conflict copy.
+        write(root, "db.kdbx.conflict-9f86d081", "newer remote content")
+
+        assertStale(root, item, ConflictResolution.KEEP_LOCAL)
+        assertEquals("local", read(root, "db.kdbx"))
+        assertEquals("newer remote content", read(root, "db.kdbx.conflict-9f86d081"))
+    }
+
+    @Test
+    fun `keep remote refuses when the conflict copy changed after the scan`(@TempDir root: File) = runTest {
+        write(root, "db.kdbx", "local")
+        write(root, "db.kdbx.conflict-9f86d081", "remote")
+        val item = scanOne(root)
+
+        val copy = File(root, "db.kdbx.conflict-9f86d081")
+        assertTrue(copy.setLastModified(copy.lastModified() + 5_000)) // same size, new mtime
+
+        assertStale(root, item, ConflictResolution.KEEP_REMOTE)
+        assertEquals("local", read(root, "db.kdbx"))
+        assertEquals("remote", read(root, "db.kdbx.conflict-9f86d081"))
+    }
+
+    @Test
     fun `keep both still succeeds on a stale item because nothing is discarded`(@TempDir root: File) = runTest {
         write(root, "db.kdbx", "local")
         write(root, "db.kdbx.conflict-9f86d081", "remote")
