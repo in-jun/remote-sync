@@ -58,6 +58,8 @@ class InMemoryStorage(private val fault: FaultController? = null) : Storage {
     private var clock = 1L
 
     // ---- test helpers (not part of the Storage contract) ----
+    /** Runs after a scan's snapshot is taken — mutations here land between scan and apply. */
+    var afterScanForTest: (() -> Unit)? = null
     fun seed(path: String, content: String) { files[path] = Node(content.toByteArray(), clock++) }
     fun deleteForTest(path: String) { files.remove(path) }
     fun contentOf(path: String): String? = files[path]?.let { String(it.bytes) }
@@ -65,8 +67,11 @@ class InMemoryStorage(private val fault: FaultController? = null) : Storage {
     fun hashesByPath(): Map<String, String> = files.mapValues { sha256(it.value.bytes) }
 
     // ---- Storage ----
-    override suspend fun scan(hint: Snapshot): Snapshot =
-        Snapshot(files.mapValues { (_, n) -> FileMeta(n.bytes.size.toLong(), n.mtime, sha256(n.bytes)) })
+    override suspend fun scan(hint: Snapshot): Snapshot {
+        val snap = Snapshot(files.mapValues { (_, n) -> FileMeta(n.bytes.size.toLong(), n.mtime, sha256(n.bytes)) })
+        afterScanForTest?.invoke()
+        return snap
+    }
 
     override suspend fun read(path: String): Source {
         val n = files[path] ?: throw NoSuchElementException("read missing: $path")
