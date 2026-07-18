@@ -6,12 +6,14 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -38,6 +40,7 @@ import java.util.Locale
 @Composable
 fun ConflictsScreen(
     conflicts: List<ConflictItem>,
+    resolving: Set<String>,
     onResolve: (ConflictItem, ConflictResolution) -> Unit,
     onBack: () -> Unit,
 ) {
@@ -70,8 +73,8 @@ fun ConflictsScreen(
                 Modifier.fillMaxSize().padding(padding).padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                items(conflicts, key = { it.pairId to it.conflictCopyPath }) { item ->
-                    ConflictCard(item, onResolve)
+                items(conflicts, key = { it.key }) { item ->
+                    ConflictCard(item, item.key in resolving, onResolve)
                 }
             }
         }
@@ -79,15 +82,28 @@ fun ConflictsScreen(
 }
 
 @Composable
-private fun ConflictCard(item: ConflictItem, onResolve: (ConflictItem, ConflictResolution) -> Unit) {
+private fun ConflictCard(
+    item: ConflictItem,
+    resolving: Boolean,
+    onResolve: (ConflictItem, ConflictResolution) -> Unit,
+) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp)) {
-            Text(
-                "${item.pairName} · ${item.originalPath}",
-                style = MaterialTheme.typography.titleSmall,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "${item.pairName} · ${item.originalPath}",
+                    style = MaterialTheme.typography.titleSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                if (resolving) {
+                    CircularProgressIndicator(
+                        Modifier.padding(start = 8.dp).size(18.dp),
+                        strokeWidth = 2.dp,
+                    )
+                }
+            }
 
             VersionBlock("Local (this device)", item.localSize, item.localMtime, item.localPreview)
             VersionBlock("Remote (server)", item.remoteSize, item.remoteMtime, item.remotePreview)
@@ -98,15 +114,18 @@ private fun ConflictCard(item: ConflictItem, onResolve: (ConflictItem, ConflictR
             ) {
                 OutlinedButton(
                     onClick = { onResolve(item, ConflictResolution.KEEP_LOCAL) },
+                    enabled = !resolving,
                     modifier = Modifier.weight(1f),
                 ) { Text("Keep local") }
                 OutlinedButton(
                     onClick = { onResolve(item, ConflictResolution.KEEP_REMOTE) },
+                    enabled = !resolving,
                     modifier = Modifier.weight(1f),
                 ) { Text("Keep remote") }
             }
             TextButton(
                 onClick = { onResolve(item, ConflictResolution.KEEP_BOTH) },
+                enabled = !resolving,
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("Keep both") }
             Text(

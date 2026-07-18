@@ -30,7 +30,13 @@ data class ConflictItem(
     val remotePreview: String?,
     /** The kept-both filename that "keep both" would produce, for the UI to show. */
     val keepBothName: String,
-)
+) {
+    /**
+     * Stable, Bundle-saveable identity for a conflict: safe as a Compose list key
+     * (a raw Pair is not) and as a busy-state key while resolution is in flight.
+     */
+    val key: String get() = "$pairId:$conflictCopyPath"
+}
 
 enum class ConflictResolution {
     /** Keep the canonical (local) version; discard the preserved remote copy. */
