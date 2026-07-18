@@ -7,6 +7,7 @@ import javax.inject.Singleton
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 
 /** Last completed sync for a pair; persisted so it survives app restarts and reflects background syncs. */
 data class LastSync(val atMillis: Long, val outcome: String)
@@ -28,12 +29,12 @@ class SyncStateStore @Inject constructor(
     fun record(pairId: Long, outcome: String) {
         val now = System.currentTimeMillis()
         prefs.edit().putLong("t_$pairId", now).putString("o_$pairId", outcome).apply()
-        _lastSync.value = _lastSync.value + (pairId to LastSync(now, outcome))
+        _lastSync.update { it + (pairId to LastSync(now, outcome)) }
     }
 
     fun forget(pairId: Long) {
         prefs.edit().remove("t_$pairId").remove("o_$pairId").apply()
-        _lastSync.value = _lastSync.value - pairId
+        _lastSync.update { it - pairId }
     }
 
     private fun loadAll(): Map<Long, LastSync> =
