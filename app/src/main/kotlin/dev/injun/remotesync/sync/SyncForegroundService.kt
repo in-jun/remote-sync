@@ -1,5 +1,6 @@
 package dev.injun.remotesync.sync
 
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
@@ -125,20 +126,23 @@ class SyncForegroundService : Service() {
         super.onDestroy()
     }
 
-    private fun buildNotification() =
-        NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Remote Sync")
-            .setContentText("Real-time sync running")
-            .setSmallIcon(android.R.drawable.stat_notify_sync)
-            .setOngoing(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .build()
+    private fun buildNotification() = buildStatusNotification(this, "Real-time sync running")
 
     companion object {
         const val CHANNEL_ID = "sync_status"
         private const val TAG = "SyncForegroundService"
         private const val NOTIFICATION_ID = 1001
         private const val SAFETY_POLL_MINUTES = 10L
+
+        /** The ongoing low-priority status notification; also used by [SyncWorker]. */
+        fun buildStatusNotification(context: Context, text: String): Notification =
+            NotificationCompat.Builder(context, CHANNEL_ID)
+                .setContentTitle("Remote Sync")
+                .setContentText(text)
+                .setSmallIcon(android.R.drawable.stat_notify_sync)
+                .setOngoing(true)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .build()
 
         /** Idempotent; also used by [SyncWorker] when it promotes itself to foreground. */
         fun createChannel(context: Context) {
