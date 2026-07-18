@@ -2,6 +2,7 @@ package dev.injun.remotesync.ui
 
 import android.Manifest
 import android.app.Activity
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
@@ -39,14 +40,41 @@ fun hasAllFilesAccess(context: Context): Boolean =
             PackageManager.PERMISSION_GRANTED
     }
 
+/**
+ * Starts the first of [intents] that resolves to an activity. Several settings
+ * actions (all-files-access, per-app notification, battery-optimization) aren't
+ * guaranteed to exist on every OEM build, so callers list a generic fallback last;
+ * if none resolve the call is a no-op rather than an ActivityNotFoundException crash.
+ */
+private fun Context.startFirstAvailable(vararg intents: Intent) {
+    for (intent in intents) {
+        try {
+            startActivity(intent)
+            return
+        } catch (e: ActivityNotFoundException) {
+            // No activity for this action on this device; try the next fallback.
+        }
+    }
+}
+
+/** App details page, the fallback that every device exposes. */
+private fun appDetailsIntent(context: Context) = Intent(
+    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+    Uri.parse("package:${context.packageName}"),
+)
+
 /** Opens the system "All files access" settings page for this app. */
 fun openAllFilesAccessSettings(context: Context) {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-        val intent = Intent(
-            Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
-            Uri.parse("package:${context.packageName}"),
+        context.startFirstAvailable(
+            Intent(
+                Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                Uri.parse("package:${context.packageName}"),
+            ),
+            // Some builds only expose the device-wide list, not the per-app page.
+            Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION),
+            appDetailsIntent(context),
         )
-        context.startActivity(intent)
     }
 }
 
@@ -69,12 +97,7 @@ fun rememberStorageAccessRequest(): () -> Unit {
                 Manifest.permission.WRITE_EXTERNAL_STORAGE,
             )
         ) {
-            context.startActivity(
-                Intent(
-                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                    Uri.parse("package:${context.packageName}"),
-                ),
-            )
+            context.startFirstAvailable(appDetailsIntent(context))
         }
     }
     return {
@@ -136,9 +159,10 @@ fun rememberNotificationAccessRequest(): () -> Unit {
 }
 
 private fun openNotificationSettings(context: Context) {
-    context.startActivity(
+    context.startFirstAvailable(
         Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
             .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName),
+        appDetailsIntent(context),
     )
 }
 
@@ -188,11 +212,14 @@ fun isIgnoringBatteryOptimizations(context: Context): Boolean =
 
 /** Shows the system dialog asking to exempt this app from battery optimizations. */
 fun requestIgnoreBatteryOptimizations(context: Context) {
-    context.startActivity(
+    context.startFirstAvailable(
         Intent(
             Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
             Uri.parse("package:${context.packageName}"),
         ),
+        // Fall back to the device-wide battery-optimization list, then app details.
+        Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS),
+        appDetailsIntent(context),
     )
 }
 
