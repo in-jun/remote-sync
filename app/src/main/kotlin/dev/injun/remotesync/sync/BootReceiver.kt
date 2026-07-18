@@ -11,9 +11,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 /**
- * Restores background sync after a reboot. The WorkManager periodic job persists on
- * its own; this brings the REALTIME foreground service back without waiting for the
- * user to open the app.
+ * Restores background sync after a reboot or an app update. The WorkManager periodic
+ * job persists on its own; this brings the REALTIME foreground service back without
+ * waiting for the user to open the app.
  */
 @AndroidEntryPoint
 class BootReceiver : BroadcastReceiver() {
@@ -22,7 +22,9 @@ class BootReceiver : BroadcastReceiver() {
     @Inject lateinit var scheduler: SyncScheduler
 
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
+        if (intent.action != Intent.ACTION_BOOT_COMPLETED &&
+            intent.action != Intent.ACTION_MY_PACKAGE_REPLACED
+        ) return
         // Config loads on IO (Keystore + disk); go async so the main thread isn't blocked.
         val result = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
