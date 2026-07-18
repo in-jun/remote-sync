@@ -88,8 +88,11 @@ class MainViewModel @Inject constructor(
             if (config.settings.value.mode != SyncMode.PERIODIC) return@launch
             config.pairs
                 .flatMapLatest { changeTriggers.forPairs(it) }
-                .debounce(1500)
-                .collect { syncAll() }
+                .debounce(ChangeTriggers.DEBOUNCE_MS)
+                // Suspend inline (like SyncForegroundService) so debounce backpressures:
+                // a change landing mid-pass queues one follow-up sync instead of being
+                // dropped by the in-flight skip in syncAllNow.
+                .collect { syncAllNow() }
         }
     }
 
@@ -175,23 +178,25 @@ class MainViewModel @Inject constructor(
      * routine, not news.
      */
     fun syncAll(manual: Boolean = false) {
-        viewModelScope.launch {
-            config.awaitLoaded()
-            if (!networkGate.allowsSync(config.settings.value)) {
-                if (manual) _error.value = SYNC_BLOCKED_MESSAGE
-                return@launch
-            }
-            for (pair in config.pairs.value) {
-                if (pair.id in _syncing.value) continue
-                _syncing.value = _syncing.value + pair.id
-                try {
-                    trySync(pair)
-                } finally {
-                    _syncing.value = _syncing.value - pair.id
-                }
-            }
-            refreshConflicts()
+        viewModelScope.launch { syncAllNow(manual) }
+    }
+
+    private suspend fun syncAllNow(manual: Boolean = false) {
+        config.awaitLoaded()
+        if (!networkGate.allowsSync(config.settings.value)) {
+            if (manual) _error.value = SYNC_BLOCKED_MESSAGE
+            return
         }
+        for (pair in config.pairs.value) {
+            if (pair.id in _syncing.value) continue
+            _syncing.value = _syncing.value + pair.id
+            try {
+                trySync(pair)
+            } finally {
+                _syncing.value = _syncing.value - pair.id
+            }
+        }
+        refreshConflicts()
     }
 
     fun refreshConflicts() {
