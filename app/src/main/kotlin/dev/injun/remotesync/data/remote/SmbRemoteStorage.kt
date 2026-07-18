@@ -55,14 +55,22 @@ class SmbRemoteStorage(
     private fun share(): DiskShare {
         share?.let { return it }
         val conn = connectEncrypted(client)
-        val sess = conn.authenticate(
-            AuthenticationContext(config.username, config.password.toCharArray(), config.domain),
-        )
-        val disk = sess.connectShare(config.shareName) as DiskShare
-        connection = conn
-        session = sess
-        share = disk
-        return disk
+        try {
+            val sess = conn.authenticate(
+                AuthenticationContext(config.username, config.password.toCharArray(), config.domain),
+            )
+            val disk = sess.connectShare(config.shareName) as DiskShare
+            connection = conn
+            session = sess
+            share = disk
+            return disk
+        } catch (t: Throwable) {
+            // authenticate/connectShare failed before the fields were assigned, so
+            // close() would find nothing to release — close the live connection here
+            // or its socket and packet-reader thread leak on every failed attempt.
+            runCatching { conn.close() }
+            throw t
+        }
     }
 
     // smbj's withEncryptData is best-effort: it only takes effect when the negotiated
@@ -101,8 +109,8 @@ class SmbRemoteStorage(
                 // In-flight or orphaned writeAtomic temp (ours or another device's) —
                 // never a sync entry. Remove it only once it is old enough that no
                 // writer can still be streaming into it.
-                val ageMs = System.currentTimeMillis() - info.lastWriteTime.toEpochMillis()
-                if (ageMs > STALE_TEMP_AGE_MS) runCatching { disk.rm(smbPath(childRel)) }
+                val ageMs = serverNowMillis()?.let { it - info.lastWriteTime.toEpochMillis() }
+                if (ageMs != null && ageMs > STALE_TEMP_AGE_MS) runCatching { disk.rm(smbPath(childRel)) }
                 continue
             }
             if (isDir) {
@@ -111,6 +119,16 @@ class SmbRemoteStorage(
                 out.add(RawEntry(childRel, info.endOfFile, info.lastWriteTime.toEpochMillis()))
             }
         }
+    }
+
+    // Temp age must be measured on the server's clock: mtimes are server-stamped, and
+    // against the device clock a NAS running behind would make another device's
+    // seconds-old temp look stale (deleting it mid-write), while one running ahead
+    // would keep orphans forever. The offset (device minus server, captured at
+    // negotiate) converts device "now" into server "now"; without one, skip reaping.
+    private fun serverNowMillis(): Long? {
+        val offset = connection?.connectionContext?.timeOffsetMillis ?: return null
+        return System.currentTimeMillis() - offset
     }
 
     override suspend fun read(path: String): Source = withContext(Dispatchers.IO) {
@@ -383,6 +401,9 @@ class SmbRemoteStorage(
         runCatching { share?.close() }
         runCatching { session?.close() }
         runCatching { connection?.close() }
+        // Backstop: the client tracks every connection it opened, so closing it
+        // releases anything a partial connect left behind.
+        runCatching { client.close() }
         share = null
         session = null
         connection = null
