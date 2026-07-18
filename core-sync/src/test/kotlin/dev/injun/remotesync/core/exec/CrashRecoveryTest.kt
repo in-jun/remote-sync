@@ -32,27 +32,40 @@ class CrashRecoveryTest {
     /**
      * Run [setup] fresh for each crash budget (unarmed, so baseline state is built
      * cleanly), then arm the fault, crash the first sync at that point, resume to a
-     * fixed point, and assert both sides are identical with every required content
-     * surviving on both.
+     * fixed point, and assert both sides are identical, every required content
+     * survives on both, and no [forbiddenPaths] entry (a deleted file) reappears.
+     *
+     * A dry run first counts the durable mutations of one uninterrupted sync, so the
+     * sweep covers exactly every crash point and can insist the injected crash really
+     * aborted the sync for every in-range budget (a swallowed fault would silently
+     * degrade the sweep into testing per-file failures instead of interruption).
      */
     private suspend fun sweepCrashPoints(
-        maxSteps: Int,
         requiredContents: Set<String>,
+        forbiddenPaths: Set<String> = emptySet(),
         setup: suspend (FaultController) -> Fixture,
     ) {
-        for (budget in 0..maxSteps) {
+        val probe = FaultController()
+        val dry = setup(probe)
+        probe.arm(Int.MAX_VALUE)
+        SyncExecutor(dry.local, dry.remote, dry.ancestors).sync()
+        val mutations = probe.stepsTaken
+        assertTrue(mutations > 0, "scenario produced no durable mutations")
+
+        for (budget in 0..mutations) {
             val fault = FaultController()
             val (local, remote, ancestors) = setup(fault)
             fault.arm(budget)
             val exec = SyncExecutor(local, remote, ancestors)
 
-            // First attempt — may crash at the injected point.
+            // First attempt — must abort mid-sync at every in-range crash point.
             var crashed = false
             try {
                 exec.sync()
             } catch (_: SimulatedCrash) {
                 crashed = true
             }
+            assertEquals(budget < mutations, crashed, "crash injection did not fire (budget=$budget of $mutations)")
 
             // Resume with faults off; run to a fixed point (must converge quickly).
             fault.disable()
@@ -68,13 +81,17 @@ class CrashRecoveryTest {
             assertEquals(remote.hashesByPath(), local.hashesByPath(), "replicas diverged ($ctx)")
             assertTrue(contentsOf(local).containsAll(requiredContents), "local lost content ($ctx)")
             assertTrue(contentsOf(remote).containsAll(requiredContents), "remote lost content ($ctx)")
+            for (path in forbiddenPaths) {
+                assertTrue(path !in local.paths(), "deleted file resurrected locally: $path ($ctx)")
+                assertTrue(path !in remote.paths(), "deleted file resurrected remotely: $path ($ctx)")
+            }
         }
     }
 
     @Test
     fun `pushing many new files survives a crash at any step`() = runTest {
         val required = (1..8).map { "content$it" }.toSet()
-        sweepCrashPoints(maxSteps = 40, requiredContents = required) { fault ->
+        sweepCrashPoints(requiredContents = required) { fault ->
             val local = InMemoryStorage(fault)
             val remote = InMemoryStorage(fault)
             (1..8).forEach { local.seed("f$it.txt", "content$it") }
@@ -85,7 +102,7 @@ class CrashRecoveryTest {
     @Test
     fun `modify-modify conflict survives a crash at any step, both versions kept`() = runTest {
         val required = setOf("local-edit", "remote-edit")
-        sweepCrashPoints(maxSteps = 40, requiredContents = required) { fault ->
+        sweepCrashPoints(requiredContents = required) { fault ->
             val local = InMemoryStorage(fault)
             val remote = InMemoryStorage(fault)
             val anc = InMemoryAncestorStore(fault)
@@ -101,7 +118,7 @@ class CrashRecoveryTest {
     @Test
     fun `mixed changes survive a crash at any step`() = runTest {
         val required = setOf("keep", "localNew", "remoteNew", "conflictL", "conflictR")
-        sweepCrashPoints(maxSteps = 60, requiredContents = required) { fault ->
+        sweepCrashPoints(requiredContents = required) { fault ->
             val local = InMemoryStorage(fault)
             val remote = InMemoryStorage(fault)
             val anc = InMemoryAncestorStore(fault)
@@ -115,6 +132,31 @@ class CrashRecoveryTest {
             remote.seed("onlyR.txt", "remoteNew")
             local.seed("conf.txt", "conflictL")
             remote.seed("conf.txt", "conflictR")
+            Fixture(local, remote, anc)
+        }
+    }
+
+    @Test
+    fun `deletions survive a crash at any step and stay deleted`() = runTest {
+        // Pins the delete-then-commit ordering: committing the ancestor first would,
+        // on a crash in between, make the next pass see the survivor as CREATED and
+        // push the deleted file back — resurrecting e.g. a revoked password database.
+        sweepCrashPoints(
+            requiredContents = setOf("keep"),
+            forbiddenPaths = setOf("goneL1.txt", "goneL2.txt", "goneR1.txt", "goneR2.txt"),
+        ) { fault ->
+            val local = InMemoryStorage(fault)
+            val remote = InMemoryStorage(fault)
+            val anc = InMemoryAncestorStore(fault)
+            local.seed("keep.txt", "keep")
+            listOf("goneL1.txt", "goneL2.txt", "goneR1.txt", "goneR2.txt")
+                .forEach { local.seed(it, "stale-$it") }
+            SyncExecutor(local, remote, anc).sync()
+            // Each side revokes files the other still holds.
+            local.deleteForTest("goneL1.txt")
+            local.deleteForTest("goneL2.txt")
+            remote.deleteForTest("goneR1.txt")
+            remote.deleteForTest("goneR2.txt")
             Fixture(local, remote, anc)
         }
     }

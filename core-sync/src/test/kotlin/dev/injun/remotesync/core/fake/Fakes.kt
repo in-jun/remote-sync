@@ -7,6 +7,7 @@ import dev.injun.remotesync.core.port.AncestorStore
 import dev.injun.remotesync.core.port.RawEntry
 import dev.injun.remotesync.core.port.Storage
 import java.security.MessageDigest
+import kotlin.coroutines.cancellation.CancellationException
 import okio.Buffer
 import okio.Source
 import okio.buffer
@@ -15,8 +16,13 @@ import okio.buffer
 fun sha256(bytes: ByteArray): String =
     MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
-/** Thrown by [FaultController] to simulate a crash / power loss mid-sync. */
-class SimulatedCrash : RuntimeException("simulated crash")
+/**
+ * Thrown by [FaultController] to simulate a crash / power loss mid-sync. Extends
+ * [CancellationException] so it aborts the whole sync through the executor's real
+ * interruption path (the per-action recovery catch would swallow a plain exception,
+ * turning the "crash" into an ordinary per-file failure).
+ */
+class SimulatedCrash : CancellationException("simulated crash")
 
 /**
  * Trips a [SimulatedCrash] after a fixed number of mutating steps. Wiring it into
@@ -29,9 +35,14 @@ class SimulatedCrash : RuntimeException("simulated crash")
 class FaultController {
     private var budget: Int = Int.MAX_VALUE
 
+    /** Durable mutations attempted since the last [arm]. */
+    var stepsTaken: Int = 0
+        private set
+
     /** Begin counting; crash on the ([steps]+1)-th durable mutation. */
     fun arm(steps: Int) {
         budget = steps
+        stepsTaken = 0
     }
 
     /** Turn faults off so the same wired storages can be resumed to completion. */
@@ -41,6 +52,7 @@ class FaultController {
 
     /** Call at each durable mutation point; throws once the budget is exhausted. */
     fun step() {
+        stepsTaken++
         if (budget-- <= 0) throw SimulatedCrash()
     }
 }
