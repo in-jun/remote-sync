@@ -40,6 +40,10 @@ class DirectFileLocalStorage(private val root: File) : Storage {
         }
         val entries = ArrayList<RawEntry>()
         root.walkTopDown()
+            // Same hazard as the root check above, one level down: the walk silently
+            // yields nothing for a subdirectory it cannot list, which would read as
+            // that whole subtree being locally deleted.
+            .onFail { dir, e -> throw IOException("cannot list directory: $dir", e) }
             .filter { it.isFile }
             .forEach { f ->
                 if (TempFiles.isTempName(f.name)) {
