@@ -26,6 +26,7 @@ import dev.injun.remotesync.sync.SmbConfig
 import java.io.IOException
 import java.security.MessageDigest
 import java.util.EnumSet
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import kotlinx.coroutines.CancellationException
@@ -362,6 +363,12 @@ class SmbRemoteStorage(
                             // and, on each timeout, query the watched handle — that round
                             // trip uses smbj's bounded transaction timeout, so a dead
                             // connection throws and re-enters the backoff path.
+                            // smbj's PromiseBackedFuture wraps the wait timeout before
+                            // rethrowing, so it surfaces as ExecutionException(cause:
+                            // SMBRuntimeException(cause: TimeoutException)) rather than a
+                            // bare TimeoutException — match by cause chain, like
+                            // isChangeNotifyUnsupported. Anything else is a real failure
+                            // and must reach the reconnect path.
                             val pending = dir.watchAsync(WATCH_FILTERS, true)
                             while (isActive) {
                                 try {
@@ -369,6 +376,11 @@ class SmbRemoteStorage(
                                     break
                                 } catch (e: TimeoutException) {
                                     dir.fileInformation
+                                    backoffMs = WATCH_RETRY_MIN_MS
+                                } catch (e: ExecutionException) {
+                                    if (!isWaitTimeout(e)) throw e
+                                    dir.fileInformation
+                                    backoffMs = WATCH_RETRY_MIN_MS
                                 }
                             }
                             if (!isActive) break
@@ -405,6 +417,16 @@ class SmbRemoteStorage(
             runCatching { watchClient?.close() }
         }
     }.flowOn(Dispatchers.IO)
+
+    /** True when the exception chain bottoms out in the probe wait expiring (no change yet). */
+    private fun isWaitTimeout(e: Exception): Boolean {
+        var cause: Throwable? = e
+        while (cause != null) {
+            if (cause is TimeoutException) return true
+            cause = cause.cause
+        }
+        return false
+    }
 
     private fun isChangeNotifyUnsupported(e: Exception): Boolean {
         var cause: Throwable? = e
