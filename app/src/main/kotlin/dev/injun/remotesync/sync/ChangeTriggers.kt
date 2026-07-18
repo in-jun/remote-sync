@@ -25,4 +25,9 @@ class ChangeTriggers @Inject constructor(
         }
         return merge(*flows.toTypedArray())
     }
+
+    companion object {
+        /** Coalescing window applied by collectors of [forPairs] before syncing. */
+        const val DEBOUNCE_MS = 1500L
+    }
 }

@@ -89,7 +89,7 @@ class SyncForegroundService : Service() {
                     if (pairs.isEmpty()) emptyFlow()
                     else merge(changeTriggers.forPairs(pairs), safetyTicker())
                 }
-                .debounce(DEBOUNCE_MS)
+                .debounce(ChangeTriggers.DEBOUNCE_MS)
                 .collect { syncAll() }
         }
     }
@@ -148,7 +148,6 @@ class SyncForegroundService : Service() {
         const val TAG = "SyncForegroundService"
         const val CHANNEL_ID = "sync_status"
         const val NOTIFICATION_ID = 1001
-        const val DEBOUNCE_MS = 1500L
         const val SAFETY_POLL_MINUTES = 10L
     }
 }
