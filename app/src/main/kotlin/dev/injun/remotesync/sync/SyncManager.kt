@@ -19,8 +19,8 @@ import kotlinx.coroutines.sync.withLock
  * remote connection.
  * Records the outcome (durably) so every trigger updates the visible last-sync state,
  * and raises a notification when the outcome needs user attention (safety abort,
- * repeated failures). A [Mutex] serializes passes so manual and scheduled runs never
- * overlap.
+ * repeated failures, unresolved conflicts). A [Mutex] serializes passes so manual and
+ * scheduled runs never overlap.
  */
 @Singleton
 class SyncManager @Inject constructor(
@@ -34,26 +34,32 @@ class SyncManager @Inject constructor(
 
     suspend fun syncOnce(pair: SyncPair): SyncResult? = lock.withLock {
         config.awaitLoaded()
-        // Callers iterate pair-list snapshots, so [pair] may have been deleted since
-        // the loop started. deletePair tears down under this same lock, so a stale
-        // pass that ran here would re-record last-sync state, alerts, and ancestor
-        // rows for the dead id. Re-check while holding the lock and skip instead.
-        if (config.pair(pair.id) == null) return@withLock null
-        val local = storages.local(pair)
-        val ancestors = RoomAncestorStore(ancestorDao, pair.id)
+        // Callers iterate pair-list snapshots, so [pair] may have been deleted or
+        // edited since the loop started. Deletion and retargeting both mutate under
+        // this same lock, but syncing the stale argument would still pair the OLD
+        // roots with the freshly wiped ancestor, repopulating it with the old
+        // target's files so the next pass reads the new target's missing files as
+        // deletions. Re-fetch the current pair while holding the lock and sync that.
+        val current = config.pair(pair.id) ?: return@withLock null
+        val local = storages.local(current)
+        val ancestors = RoomAncestorStore(ancestorDao, current.id)
         // The guard threshold is the global setting shown in Settings: one source of truth.
         val guard = MaxDeleteGuard(threshold = config.settings.value.maxDeleteThreshold)
         try {
-            storages.remote(pair.remote).use { remote ->
+            storages.remote(current.remote).use { remote ->
                 val result = SyncExecutor(local, remote, ancestors, guard = guard).sync()
-                syncState.record(pair.id, outcomeText(result))
+                syncState.record(current.id, outcomeText(result))
                 when (result) {
                     // A pass with per-path failures is not a clean success: keep the
                     // consecutive-failure count going so a permanently failing file
                     // (bad name, locked, too large) still raises an alert eventually.
-                    is SyncResult.Success ->
-                        if (result.failures.isEmpty()) alerts.recordSuccess(pair) else alerts.recordFailure(pair)
-                    is SyncResult.Aborted -> alerts.notifyAborted(pair, result)
+                    is SyncResult.Success -> {
+                        if (result.failures.isEmpty()) alerts.recordSuccess(current) else alerts.recordFailure(current)
+                        // Both versions are preserved, but they stay diverged until the
+                        // user acts; a background pass must not leave that invisible.
+                        if (result.hadConflicts) alerts.notifyConflicts(current, result.conflicts.size)
+                    }
+                    is SyncResult.Aborted -> alerts.notifyAborted(current, result)
                 }
                 result
             }
@@ -62,8 +68,8 @@ class SyncManager @Inject constructor(
             // recording it would poison the last-sync state and the failure alert count.
             throw e
         } catch (e: Exception) {
-            syncState.record(pair.id, "Failed: ${e.message ?: e.javaClass.simpleName}")
-            alerts.recordFailure(pair)
+            syncState.record(current.id, "Failed: ${e.message ?: e.javaClass.simpleName}")
+            alerts.recordFailure(current)
             throw e
         }
     }
