@@ -254,6 +254,73 @@ class SyncEngineTest {
         assertEquals(0, plan.localDeletionCount + plan.remoteDeletionCount)
     }
 
+    // ---- Path collisions (case-insensitive / Unicode-normalizing replicas) ----
+
+    @Test
+    fun `case-fold colliding creations become PATH_COLLISION conflicts, not transfers`() {
+        val l = meta("localOnly")
+        val r = meta("remoteOnly")
+        val plan = reconcile(
+            local = Snapshot.of("Notes.txt" to l),
+            remote = Snapshot.of("notes.txt" to r),
+            ancestor = Snapshot.EMPTY,
+        )
+        val cu = plan.action("Notes.txt") as Conflict
+        assertEquals(ConflictKind.PATH_COLLISION, cu.kind)
+        assertEquals(l, cu.local)
+        assertNull(cu.remote)
+        val cl = plan.action("notes.txt") as Conflict
+        assertEquals(ConflictKind.PATH_COLLISION, cl.kind)
+        assertNull(cl.local)
+        assertEquals(r, cl.remote)
+        // Ancestor stays untouched for both, so the collision is re-seen until renamed.
+        assertNull(cu.ancestorAfter)
+        assertNull(cl.ancestorAfter)
+    }
+
+    @Test
+    fun `NFC and NFD spellings of the same name collide`() {
+        val nfc = "caf\u00e9.txt" // precomposed e-acute
+        val nfd = "cafe\u0301.txt" // e + combining acute
+        val plan = reconcile(
+            local = Snapshot.of(nfc to meta("L")),
+            remote = Snapshot.of(nfd to meta("R")),
+            ancestor = Snapshot.EMPTY,
+        )
+        assertEquals(ConflictKind.PATH_COLLISION, (plan.action(nfc) as Conflict).kind)
+        assertEquals(ConflictKind.PATH_COLLISION, (plan.action(nfd) as Conflict).kind)
+    }
+
+    @Test
+    fun `converged member of a collision group passes through, sibling stays blocked`() {
+        val old = meta("v1")
+        val plan = reconcile(
+            local = Snapshot.of("a.txt" to meta("localNew")),
+            remote = Snapshot.EMPTY,
+            ancestor = Snapshot.of("A.txt" to old),
+        )
+        // "A.txt" was deleted on both sides: no I/O, safe to converge even inside
+        // the collision group.
+        assertEquals(Converged("A.txt", ancestorAfter = null), plan.action("A.txt"))
+        assertEquals(ConflictKind.PATH_COLLISION, (plan.action("a.txt") as Conflict).kind)
+    }
+
+    @Test
+    fun `collision spanning ancestor and one replica blocks the delete it would propagate`() {
+        val m = meta("v1")
+        // The names already merged into one file on the case-insensitive local
+        // replica; propagating local's "deletion" of A.txt would destroy the
+        // survivor on the remote.
+        val plan = reconcile(
+            local = Snapshot.of("a.txt" to m),
+            remote = Snapshot.of("A.txt" to m, "a.txt" to m),
+            ancestor = Snapshot.of("A.txt" to m, "a.txt" to m),
+        )
+        assertEquals(ConflictKind.PATH_COLLISION, (plan.action("A.txt") as Conflict).kind)
+        assertNull(plan.action("a.txt"))
+        assertEquals(0, plan.remoteDeletionCount)
+    }
+
     @Test
     fun `independent paths are decided independently in one pass`() {
         val old = meta("v1")

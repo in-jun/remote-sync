@@ -188,6 +188,36 @@ class SyncExecutorTest {
     }
 
     @Test
+    fun `path collision performs no IO, commits no ancestor, and is re-reported`() = runTest {
+        val (local, remote, anc) = fixture()
+        local.seed("Readme.md", "local-version")
+        remote.seed("readme.md", "remote-version")
+        val exec = SyncExecutor(local, remote, anc)
+
+        val result = exec.sync() as SyncResult.Success
+
+        assertTrue(result.hadConflicts)
+        assertTrue(result.conflicts.isNotEmpty())
+        assertTrue(result.conflicts.all { it.kind == ConflictKind.PATH_COLLISION })
+        assertTrue(result.conflicts.all { it.conflictCopyPath == null })
+
+        // No I/O in either direction: each side keeps exactly its own file, and no
+        // conflict copy is materialized anywhere.
+        assertEquals(setOf("Readme.md"), local.paths())
+        assertEquals(setOf("readme.md"), remote.paths())
+        assertEquals("local-version", local.contentOf("Readme.md"))
+        assertEquals("remote-version", remote.contentOf("readme.md"))
+
+        // No ancestor is committed, so the collision surfaces again next pass.
+        assertTrue(anc.load().isEmpty())
+        val again = exec.sync() as SyncResult.Success
+        assertEquals(
+            result.conflicts.map { it.path to it.kind }.toSet(),
+            again.conflicts.map { it.path to it.kind }.toSet(),
+        )
+    }
+
+    @Test
     fun `identical edits on both sides converge without a conflict`() = runTest {
         val (local, remote, anc) = fixture()
         local.seed("a.txt", "v0")
