@@ -15,8 +15,8 @@ import com.hierynomus.smbj.auth.AuthenticationContext
 import com.hierynomus.smbj.connection.Connection
 import com.hierynomus.smbj.session.Session
 import com.hierynomus.smbj.share.DiskShare
-import dev.injun.remotesync.core.model.FileMeta
 import dev.injun.remotesync.core.model.Snapshot
+import dev.injun.remotesync.core.port.ContentHash
 import dev.injun.remotesync.core.port.RawEntry
 import dev.injun.remotesync.core.port.SnapshotBuilder
 import dev.injun.remotesync.core.port.Storage
@@ -24,7 +24,6 @@ import dev.injun.remotesync.core.port.TempFiles
 import dev.injun.remotesync.sync.RemoteStorage
 import dev.injun.remotesync.sync.SmbConfig
 import java.io.IOException
-import java.security.MessageDigest
 import java.util.EnumSet
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.TimeUnit
@@ -42,6 +41,7 @@ import kotlinx.coroutines.withContext
 import okio.Buffer
 import okio.Source
 import okio.buffer
+import okio.source
 
 /**
  * [Storage] over an SMB2/3 share via smbj (v1 remote). Writes are atomic (temp name
@@ -225,21 +225,6 @@ class SmbRemoteStorage(
         ).use { renameReplacing(disk, it, smbPath(to)) }
     }
 
-    override suspend fun stat(path: String): FileMeta? = withContext(Dispatchers.IO) {
-        val disk = share()
-        val p = smbPath(path)
-        if (!disk.fileExists(p)) {
-            null
-        } else {
-            val info = disk.getFileInformation(p)
-            FileMeta(
-                info.standardInformation.endOfFile,
-                info.basicInformation.lastWriteTime.toEpochMillis(),
-                hashRemote(disk, path),
-            )
-        }
-    }
-
     override suspend fun probe(path: String): RawEntry? = withContext(Dispatchers.IO) {
         val disk = share()
         val p = smbPath(path)
@@ -292,8 +277,7 @@ class SmbRemoteStorage(
         }
     }
 
-    private fun hashRemote(disk: DiskShare, path: String): String {
-        val md = MessageDigest.getInstance("SHA-256")
+    private fun hashRemote(disk: DiskShare, path: String): String =
         disk.openFile(
             smbPath(path),
             EnumSet.of(AccessMask.GENERIC_READ),
@@ -302,17 +286,11 @@ class SmbRemoteStorage(
             SMB2CreateDisposition.FILE_OPEN,
             null,
         ).use { file ->
-            file.getInputStream().use { ins ->
-                val buf = ByteArray(1 shl 16)
-                while (true) {
-                    val n = ins.read(buf)
-                    if (n < 0) break
-                    md.update(buf, 0, n)
-                }
-            }
+            // Close the InputStream (via the okio Source) before the handle: unlike
+            // read(), which must keep the handle to return a live stream, hashing
+            // consumes the whole file here, so both can be released.
+            ContentHash.sha256Hex(file.getInputStream().source())
         }
-        return md.digest().joinToString("") { "%02x".format(it) }
-    }
 
     /** Convert a '/'-relative sync path to a share-relative, '\'-separated SMB path. */
     private fun smbPath(rel: String): String {

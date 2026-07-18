@@ -1,6 +1,5 @@
 package dev.injun.remotesync.core.fake
 
-import dev.injun.remotesync.core.model.FileMeta
 import dev.injun.remotesync.core.model.Snapshot
 import dev.injun.remotesync.core.port.AncestorRecord
 import dev.injun.remotesync.core.port.AncestorStore
@@ -143,9 +142,6 @@ class InMemoryStorage(private val fault: FaultController? = null) : Storage {
         files[to] = n.copy(mtime = clock++)
         files.remove(from)
     }
-
-    override suspend fun stat(path: String): FileMeta? =
-        files[path]?.let { FileMeta(it.bytes.size.toLong(), it.mtime, sha256(it.bytes)) }
 
     override suspend fun probe(path: String): RawEntry? =
         files[path]?.let { RawEntry(path, it.bytes.size.toLong(), it.mtime) }

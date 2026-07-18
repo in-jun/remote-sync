@@ -7,6 +7,11 @@ package dev.injun.remotesync.core.model
 data class FileMeta(
     val size: Long,
     val mtimeMillis: Long,
+    /**
+     * The file's identity: SHA-256 of its raw bytes as lowercase hex. Local and remote
+     * hashes are compared directly, so every backend must produce this the same way —
+     * see the content-hash contract on `Storage.scan` / `ContentHash.sha256Hex`.
+     */
     val contentHash: String,
     /**
      * True when this stat was observed while its mtime still sat inside the coarse-mtime
