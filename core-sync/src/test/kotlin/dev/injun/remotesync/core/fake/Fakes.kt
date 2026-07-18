@@ -84,6 +84,10 @@ class InMemoryStorage(private val fault: FaultController? = null) : Storage {
     var afterWriteForTest: ((String) -> Unit)? = null
     /** Paths whose read throws, simulating a per-file I/O failure. */
     val failingReadsForTest = mutableSetOf<String>()
+    /** Hashes computed during [scan], so tests can assert unchanged files are reused, not re-hashed. */
+    var hashCountForTest: Int = 0
+        private set
+    fun resetHashCountForTest() { hashCountForTest = 0 }
     fun seed(path: String, content: String) { files[path] = Node(content.toByteArray(), clock++) }
     /** Bump mtime without changing content. */
     fun touchForTest(path: String) { files[path]?.let { files[path] = it.copy(mtime = clock++) } }
@@ -98,7 +102,13 @@ class InMemoryStorage(private val fault: FaultController? = null) : Storage {
         // unchanged (via SnapshotBuilder) instead of always re-hashing. That is the very
         // path a mis-attributed ancestor stat poisons, so tests can exercise it here.
         val entries = files.map { (path, n) -> RawEntry(path, n.bytes.size.toLong(), n.mtime) }
-        val snap = SnapshotBuilder.build(entries, hint) { path -> sha256(files.getValue(path).bytes) }
+        // The logical clock is a monotonic counter always ahead of every stored mtime,
+        // so a zero granularity leaves the settle guard permanently satisfied here — the
+        // guard itself is covered against real clock/granularity values in SnapshotBuilderTest.
+        val snap = SnapshotBuilder.build(entries, hint, nowMillis = clock, granularityMillis = 0L) { path ->
+            hashCountForTest++
+            sha256(files.getValue(path).bytes)
+        }
         afterScanForTest?.invoke()
         return snap
     }

@@ -385,6 +385,38 @@ class SyncExecutorTest {
     }
 
     @Test
+    fun `an unchanged file is served from the scan hint instead of being re-hashed`() = runTest {
+        val (local, remote, anc) = fixture()
+        local.seed("a.txt", "hello")
+        val exec = SyncExecutor(local, remote, anc)
+        exec.sync() // push to remote, record each side's stat in the ancestor
+
+        // A second pass scans both sides with their recorded stats as the hint; nothing
+        // changed, so neither file should be hashed again.
+        local.resetHashCountForTest()
+        remote.resetHashCountForTest()
+        val result = exec.sync() as SyncResult.Success
+
+        assertEquals(0, result.actionsApplied)
+        assertEquals(0, local.hashCountForTest, "unchanged local file was re-hashed")
+        assertEquals(0, remote.hashCountForTest, "unchanged remote file was re-hashed")
+    }
+
+    @Test
+    fun `a changed file is re-hashed on the next scan`() = runTest {
+        val (local, remote, anc) = fixture()
+        local.seed("a.txt", "hello")
+        val exec = SyncExecutor(local, remote, anc)
+        exec.sync()
+
+        local.seed("a.txt", "changed") // new size and mtime break the hint match
+        local.resetHashCountForTest()
+        exec.sync()
+
+        assertEquals(1, local.hashCountForTest)
+    }
+
+    @Test
     fun `identical edits on both sides converge without a conflict`() = runTest {
         val (local, remote, anc) = fixture()
         local.seed("a.txt", "v0")

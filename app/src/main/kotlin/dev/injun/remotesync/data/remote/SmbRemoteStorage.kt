@@ -108,7 +108,10 @@ class SmbRemoteStorage(
         }
         // A missing root with an empty hint is a first sync to a fresh remote folder:
         // empty is correct, and the first write creates it.
-        SnapshotBuilder.build(entries, hint) { path -> hashRemote(disk, path) }
+        // Server time, since the entries' mtimes are server-stamped. When the offset is
+        // unknown the reuse shortcut is disabled (every file re-hashed) rather than
+        // risked against a device clock that may run ahead of the server.
+        SnapshotBuilder.build(entries, hint, serverNowMillis()) { path -> hashRemote(disk, path) }
     }
 
     private fun walk(disk: DiskShare, dirRel: String, out: MutableList<RawEntry>) {
