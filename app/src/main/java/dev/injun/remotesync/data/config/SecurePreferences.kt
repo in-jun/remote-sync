@@ -45,11 +45,16 @@ class SecurePreferences(
 
     fun getBoolean(key: String, default: Boolean): Boolean = getString(key)?.toBooleanStrict() ?: default
 
-    /** Applies every change in [block] as one atomic write. */
+    /**
+     * Applies every change in [block] as one atomic write and waits for it to reach disk.
+     * Writes here are rare and hold the user's credentials; a synchronous commit means a
+     * crash a moment later (which apply() would race) cannot lose them. Callers already
+     * run on Dispatchers.IO.
+     */
     fun edit(block: Editor.() -> Unit) {
         val editor = prefs.edit()
         Editor(editor).block()
-        editor.apply()
+        check(editor.commit()) { "Could not write $prefs" }
     }
 
     inner class Editor internal constructor(private val editor: SharedPreferences.Editor) {
