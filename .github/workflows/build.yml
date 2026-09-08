@@ -31,13 +31,24 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v5
 
-      - name: Test
-        run: ./gradlew :core-sync:test :app:testDebugUnitTest --no-daemon
+      - name: Unit tests
+        run: ./gradlew testDebugUnitTest
 
-      - name: Build
-        run: ./gradlew assembleRelease --no-daemon
+      - name: Lint
+        run: ./gradlew lintDebug
+
+      - name: Build release APK
+        run: ./gradlew assembleRelease
 
       - uses: actions/upload-artifact@v7
         with:
           name: RemoteSync
           path: app/build/outputs/apk/release/*.apk
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: reports
+          path: |
+            **/build/reports/lint-results-*.html
+            **/build/reports/tests/
