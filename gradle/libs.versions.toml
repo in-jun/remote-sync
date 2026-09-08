@@ -14,6 +14,7 @@ androidxNavigation3 = "1.1.7"
 androidxRoom = "2.8.4"
 androidxWork = "2.11.2"
 androidxHilt = "1.4.0"
+androidxHealthConnect = "1.1.0"
 
 # DI
 hilt = "2.60.1"
@@ -67,6 +68,10 @@ androidx-room-compiler = { module = "androidx.room:room-compiler", version.ref =
 androidx-work-runtime-ktx = { module = "androidx.work:work-runtime-ktx", version.ref = "androidxWork" }
 androidx-hilt-work = { module = "androidx.hilt:hilt-work", version.ref = "androidxHilt" }
 androidx-hilt-compiler = { module = "androidx.hilt:hilt-compiler", version.ref = "androidxHilt" }
+androidx-hilt-lifecycle-viewmodel-compose = { module = "androidx.hilt:hilt-lifecycle-viewmodel-compose", version.ref = "androidxHilt" }
+
+# Health
+androidx-health-connect-client = { module = "androidx.health.connect:connect-client", version.ref = "androidxHealthConnect" }
 
 # DI
 hilt-android = { module = "com.google.dagger:hilt-android", version.ref = "hilt" }
