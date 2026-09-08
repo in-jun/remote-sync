@@ -1,8 +1,14 @@
 name: Build
 
+# One workflow for every event. The build job runs for pushes, pull requests and
+# version tags and always produces the unsigned release APK. On a vMAJOR.MINOR.PATCH
+# tag the release job takes that exact artifact, signs it with the keystore held in
+# repository secrets, and attaches it to a GitHub Release. The key is only ever
+# decoded inside the release job.
 on:
   push:
     branches: [main]
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
   pull_request:
   workflow_dispatch:
 
@@ -11,7 +17,7 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   build:
@@ -37,13 +43,22 @@ jobs:
       - name: Lint
         run: ./gradlew lintDebug
 
+      # A version tag stamps versionName/versionCode into the build (see
+      # app/build.gradle.kts); every other event builds with the in-repo defaults.
       - name: Build release APK
-        run: ./gradlew assembleRelease
+        run: |
+          set -euo pipefail
+          args=()
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            args+=("-PreleaseVersion=${GITHUB_REF_NAME#v}")
+          fi
+          ./gradlew assembleRelease "${args[@]}"
 
       - uses: actions/upload-artifact@v7
         with:
           name: RemoteSync
           path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
 
       - uses: actions/upload-artifact@v7
         if: always()
@@ -52,3 +67,53 @@ jobs:
           path: |
             **/build/reports/lint-results-*.html
             **/build/reports/tests/
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: RemoteSync
+          path: apk
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: build-tools;36.0.0
+
+      # apksigner is the SDK's own signing tool
+      # (https://developer.android.com/tools/apksigner); it re-signs the artifact the
+      # build job produced, so what ships is byte-for-byte what was tested.
+      - name: Sign the build artifact
+        env:
+          SIGNING_KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s' "$SIGNING_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          unsigned=$(ls apk/*.apk)
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" sign \
+            --ks "$RUNNER_TEMP/release.jks" \
+            --ks-key-alias "$SIGNING_KEY_ALIAS" \
+            --ks-pass env:SIGNING_STORE_PASSWORD \
+            --key-pass env:SIGNING_KEY_PASSWORD \
+            --out "RemoteSync-${GITHUB_REF_NAME}.apk" \
+            "$unsigned"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "RemoteSync-${GITHUB_REF_NAME}.apk"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release create "$GITHUB_REF_NAME" "RemoteSync-${GITHUB_REF_NAME}.apk" --title "$GITHUB_REF_NAME" --generate-notes
+
+      - name: Remove signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"

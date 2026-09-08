@@ -8,10 +8,11 @@ plugins {
     alias(libs.plugins.hilt)
 }
 
-// Release signing, per https://developer.android.com/studio/publish/app-signing:
+// Local release signing, per https://developer.android.com/studio/publish/app-signing:
 // keystore.properties (storeFile, storePassword, keyAlias, keyPassword) is loaded
 // from the project root, or from ~/.android/release/ on a developer machine. Neither
-// file is committed; without one the release build is produced unsigned.
+// file is committed; without one the release build is produced unsigned, which is what
+// CI does (the workflow signs the artifact afterwards with apksigner).
 val keystorePropertiesFile = listOf(
     rootProject.file("keystore.properties"),
     File(System.getProperty("user.home"), ".android/release/keystore.properties"),
@@ -20,7 +21,7 @@ val keystoreProperties = Properties().apply {
     keystorePropertiesFile?.inputStream()?.use(::load)
 }
 
-// Release builds take their version from the git tag: release.yml passes
+// Release builds take their version from the git tag: the workflow passes
 // -PreleaseVersion=1.2.3 for tag v1.2.3. versionCode is derived so it stays monotonic.
 val releaseVersion = providers.gradleProperty("releaseVersion").orNull
 fun versionCodeOf(version: String): Int {
