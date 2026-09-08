@@ -1,39 +1,45 @@
 name: Release
 
-# Tag a commit on main as vMAJOR.MINOR.PATCH and push the tag; this signs the release
-# APK with the keystore held in repository secrets and attaches it to a GitHub Release.
+# Tag a commit on main as vMAJOR.MINOR.PATCH and push the tag. The build job is
+# build.yml itself (tests, lint, unsigned release APK); the release job signs that
+# exact artifact with the keystore held in repository secrets and attaches it to a
+# GitHub Release. The key is only ever decoded inside the release job.
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+"]
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: release-${{ github.ref }}
 
 jobs:
-  release:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v6
+  build:
+    uses: ./.github/workflows/build.yml
+    with:
+      tag: ${{ github.ref_name }}
 
-      - uses: actions/setup-java@v5
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
         with:
-          distribution: temurin
-          java-version: 21
+          name: RemoteSync
+          path: apk
 
       - uses: android-actions/setup-android@v3
         with:
-          packages: ""
+          packages: build-tools;36.0.0
 
-      - uses: gradle/actions/setup-gradle@v5
-
-      # keystore.properties in the project root is what app/build.gradle.kts loads
-      # (https://developer.android.com/studio/publish/app-signing). The keystore itself
-      # is decoded outside the workspace and removed again in the last step.
-      - name: Install signing key
+      # apksigner is the SDK's own signing tool
+      # (https://developer.android.com/tools/apksigner). Passwords go through env:
+      # so they never appear on a command line.
+      - name: Sign the build artifact
         env:
           SIGNING_KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
           SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
@@ -43,34 +49,22 @@ jobs:
           set -euo pipefail
           umask 077
           printf '%s' "$SIGNING_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
-          {
-            echo "storeFile=$RUNNER_TEMP/release.jks"
-            echo "storePassword=$SIGNING_STORE_PASSWORD"
-            echo "keyAlias=$SIGNING_KEY_ALIAS"
-            echo "keyPassword=$SIGNING_KEY_PASSWORD"
-          } > keystore.properties
-
-      - name: Unit tests
-        run: ./gradlew testDebugUnitTest
-
-      - name: Lint
-        run: ./gradlew lintDebug
-
-      - name: Build signed release APK
-        run: ./gradlew assembleRelease -PreleaseVersion="${GITHUB_REF_NAME#v}"
-
-      - name: Verify signature and name the APK
-        run: |
-          set -euo pipefail
-          apk=$(ls app/build/outputs/apk/release/*.apk)
-          "$ANDROID_HOME"/build-tools/*/apksigner verify --print-certs "$apk"
-          mv "$apk" "RemoteSync-${GITHUB_REF_NAME}.apk"
+          unsigned=$(ls apk/*.apk)
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" sign \
+            --ks "$RUNNER_TEMP/release.jks" \
+            --ks-key-alias "$SIGNING_KEY_ALIAS" \
+            --ks-pass env:SIGNING_STORE_PASSWORD \
+            --key-pass env:SIGNING_KEY_PASSWORD \
+            --out "RemoteSync-${GITHUB_REF_NAME}.apk" \
+            "$unsigned"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "RemoteSync-${GITHUB_REF_NAME}.apk"
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: gh release create "$GITHUB_REF_NAME" "RemoteSync-${GITHUB_REF_NAME}.apk" --title "$GITHUB_REF_NAME" --generate-notes
 
       - name: Remove signing key
         if: always()
-        run: rm -f "$RUNNER_TEMP/release.jks" keystore.properties
+        run: rm -f "$RUNNER_TEMP/release.jks"

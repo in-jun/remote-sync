@@ -1,22 +1,29 @@
 name: Build
 
+# CI for pushes and pull requests, and the single build definition that release.yml
+# reuses (workflow_call) so a release ships the same artifact this workflow tested.
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      tag:
+        description: Version tag (vMAJOR.MINOR.PATCH) to stamp into the build
+        required: false
+        type: string
 
 permissions:
   contents: read
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    concurrency:
+      group: build-${{ github.ref }}
+      cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
     steps:
       - uses: actions/checkout@v6
 
@@ -37,13 +44,24 @@ jobs:
       - name: Lint
         run: ./gradlew lintDebug
 
+      # A version tag stamps versionName/versionCode into the build (see
+      # app/build.gradle.kts); every other event builds with the in-repo defaults.
       - name: Build release APK
-        run: ./gradlew assembleRelease
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [[ -n "$TAG" ]]; then
+            args+=("-PreleaseVersion=${TAG#v}")
+          fi
+          ./gradlew assembleRelease "${args[@]}"
 
       - uses: actions/upload-artifact@v7
         with:
           name: RemoteSync
           path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
 
       - uses: actions/upload-artifact@v7
         if: always()
