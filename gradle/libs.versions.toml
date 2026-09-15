@@ -15,12 +15,15 @@ androidxRoom = "2.8.4"
 androidxWork = "2.11.2"
 androidxHilt = "1.4.0"
 androidxHealthConnect = "1.1.0"
+androidxBrowser = "1.10.0"
 
 # DI
 hilt = "2.60.1"
 
 # IO
 okio = "3.18.2"
+okhttp = "5.5.0"
+kotlinxSerialization = "1.11.0"
 smbj = "0.15.0"
 
 # Test
@@ -36,6 +39,7 @@ androidxTestEspresso = "3.7.0"
 kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }
 kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "coroutines" }
 kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "coroutines" }
+kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "kotlinxSerialization" }
 
 # AndroidX core
 androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "androidxCore" }
@@ -72,6 +76,7 @@ androidx-hilt-lifecycle-viewmodel-compose = { module = "androidx.hilt:hilt-lifec
 
 # Health
 androidx-health-connect-client = { module = "androidx.health.connect:connect-client", version.ref = "androidxHealthConnect" }
+androidx-browser = { module = "androidx.browser:browser", version.ref = "androidxBrowser" }
 
 # DI
 hilt-android = { module = "com.google.dagger:hilt-android", version.ref = "hilt" }
@@ -79,6 +84,7 @@ hilt-compiler = { module = "com.google.dagger:hilt-compiler", version.ref = "hil
 
 # IO
 okio = { module = "com.squareup.okio:okio", version.ref = "okio" }
+okhttp = { module = "com.squareup.okhttp3:okhttp", version.ref = "okhttp" }
 smbj = { module = "com.hierynomus:smbj", version.ref = "smbj" }
 
 # Local tests
