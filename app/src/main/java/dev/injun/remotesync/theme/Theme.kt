@@ -1,34 +1,75 @@
 package dev.injun.remotesync.theme
 
-import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.graphics.Color
 
-private val DarkColorScheme = darkColorScheme(primary = Blue80, secondary = Teal80, tertiary = Slate80)
+/**
+ * The app keeps its own colours rather than following the wallpaper.
+ *
+ * The icon is a specific blue, and the app opens in it. Two colours here carry a
+ * meaning that has to hold on every phone: the amber of the conflict banner, which
+ * asks for a decision, and the red of a sync that failed. A scheme taken from the
+ * wallpaper hands those roles whatever it has, and on some phones the two are the
+ * same colour.
+ */
+private val LightColors = lightColorScheme(
+    primary = Blue40,
+    onPrimary = Color.White,
+    primaryContainer = Blue90,
+    onPrimaryContainer = Blue10,
+    secondary = BlueGrey30,
+    onSecondary = Color.White,
+    secondaryContainer = BlueGrey90,
+    onSecondaryContainer = Blue10,
+    tertiary = Amber40,
+    onTertiary = Color.White,
+    tertiaryContainer = Amber90,
+    onTertiaryContainer = Amber30,
+    background = Neutral99,
+    onBackground = Neutral10,
+    surface = Neutral99,
+    onSurface = Neutral10,
+    surfaceVariant = BlueGrey90,
+    onSurfaceVariant = BlueGrey30,
+    outline = BlueGrey60,
+    outlineVariant = BlueGrey80,
+)
 
-private val LightColorScheme = lightColorScheme(primary = Blue40, secondary = Teal40, tertiary = Slate40)
+private val DarkColors = darkColorScheme(
+    primary = Blue80,
+    onPrimary = Blue10,
+    primaryContainer = Blue30,
+    onPrimaryContainer = Blue90,
+    secondary = BlueGrey80,
+    onSecondary = Blue10,
+    secondaryContainer = BlueGrey30,
+    onSecondaryContainer = BlueGrey90,
+    tertiary = Amber80,
+    onTertiary = Amber30,
+    tertiaryContainer = Amber30,
+    onTertiaryContainer = Amber90,
+    background = Neutral10,
+    onBackground = Neutral90,
+    surface = Neutral10,
+    onSurface = Neutral90,
+    surfaceVariant = BlueGrey30,
+    onSurfaceVariant = BlueGrey80,
+    outline = BlueGrey60,
+    outlineVariant = BlueGrey30,
+)
 
 @Composable
 fun RemoteSyncTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
-    // Dynamic color is available on Android 12+
-    dynamicColor: Boolean = true,
     content: @Composable () -> Unit,
 ) {
-    val colorScheme = when {
-        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-            val context = LocalContext.current
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        }
-        darkTheme -> DarkColorScheme
-        else -> LightColorScheme
-    }
-
-    MaterialTheme(colorScheme = colorScheme, typography = Typography, content = content)
+    MaterialTheme(
+        colorScheme = if (darkTheme) DarkColors else LightColors,
+        typography = Typography,
+        content = content,
+    )
 }
