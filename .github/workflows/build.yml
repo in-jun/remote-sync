@@ -39,7 +39,7 @@ jobs:
       - uses: gradle/actions/setup-gradle@v5
 
       - name: Unit tests
-        run: ./gradlew testDebugUnitTest
+        run: ./gradlew testDebugUnitTest :core-sync:test
 
       - name: Lint
         run: ./gradlew lintDebug
